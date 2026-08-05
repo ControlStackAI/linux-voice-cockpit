@@ -58,7 +58,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, {
       "Content-Type": asset.type,
       "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self' https://api.openai.com; media-src 'self' blob:; style-src 'self' 'unsafe-inline'",
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self'; media-src 'self' blob:; style-src 'self' 'unsafe-inline'",
       "Referrer-Policy": "no-referrer",
     });
     response.end(await readFile(asset.path));

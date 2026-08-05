@@ -96,5 +96,7 @@ Open `http://127.0.0.1:4280` in the graphical session and:
 - Optional explicit `COCKPIT_OPENCLAW_AUTH_STORE` and `COCKPIT_OPENCLAW_AUTH_PROFILE`.
 - Outbound service access to `https://auth.openai.com` and `https://chatgpt.com`; microphone
   permission for the intended PipeWire device.
+- Primary-mode browser CSP permits same-origin control traffic only; provider OAuth/admission
+  HTTPS is server-side and `https://api.openai.com` is not allowlisted.
 - No Quickshell dependency in the cockpit package. Agentic Desktop should consume a later
   sanitized status/control API from its own pen-owned repository.
