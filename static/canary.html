@@ -5,14 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Linux Voice Cockpit Canary</title>
     <style>
-      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-      body { max-width: 44rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+        --background: Canvas;
+        --foreground: CanvasText;
+        --surface: color-mix(in srgb, Canvas 92%, CanvasText 8%);
+        --border: color-mix(in srgb, CanvasText 24%, transparent);
+        --primary: LinkText;
+        --primary-foreground: Canvas;
+        --muted-foreground: color-mix(in srgb, CanvasText 72%, transparent);
+        --danger: CanvasText;
+      }
+      body { max-width: 44rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; background: var(--background); color: var(--foreground); }
       main { display: grid; gap: 1rem; }
       label { display: grid; gap: .25rem; }
-      input, button { font: inherit; padding: .65rem; }
+      input, button { box-sizing: border-box; min-height: 44px; font: inherit; padding: .65rem; border: 1px solid var(--border); border-radius: .5rem; }
+      button { cursor: pointer; background: var(--primary); color: var(--primary-foreground); transition: filter 120ms ease, opacity 120ms ease; }
+      button:hover { filter: brightness(1.08); }
+      button:active { filter: brightness(.92); }
+      button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+      button:disabled { cursor: not-allowed; opacity: .5; }
       .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
-      #status { text-transform: uppercase; font-weight: 700; }
-      #detail { min-height: 1.5rem; overflow-wrap: anywhere; }
+      .status-panel { border: 1px solid var(--border); border-radius: .75rem; padding: 1rem; background: var(--surface); }
+      #status { display: block; text-transform: uppercase; font-weight: 700; }
+      #detail { display: block; min-height: 1.5rem; margin-top: .25rem; color: var(--muted-foreground); overflow-wrap: anywhere; }
+      .status-panel[data-tone="error"] { border-color: var(--danger); }
+      .status-panel[data-tone="error"] #status, .status-panel[data-tone="error"] #detail { color: var(--danger); }
     </style>
   </head>
   <body>
@@ -26,7 +45,10 @@
         <button id="start" type="button">Start microphone</button>
         <button id="stop" type="button" disabled>Stop and tear down</button>
       </div>
-      <p><span id="status">idle</span><br><span id="detail" aria-live="polite"></span></p>
+      <div id="status-panel" class="status-panel" data-tone="neutral" role="status" aria-live="polite" aria-atomic="true">
+        <span id="status">idle</span>
+        <span id="detail">Ready. Starting will ask this browser for microphone access.</span>
+      </div>
       <label>Steering text
         <input id="steering-text" value="Give me a brief progress update" autocomplete="off">
       </label>

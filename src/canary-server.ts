@@ -46,9 +46,16 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const assets = new Map<string, { path: string; type: string }>([
   ["/", { path: `${root}/static/canary.html`, type: "text/html; charset=utf-8" }],
   ["/canary.js", { path: `${root}/dist/src/browser-canary.js`, type: "text/javascript; charset=utf-8" }],
+  ["/cockpit-controller.js", { path: `${root}/dist/src/cockpit-controller.js`, type: "text/javascript; charset=utf-8" }],
+  ["/realtime-event-bridge.js", { path: `${root}/dist/src/realtime-event-bridge.js`, type: "text/javascript; charset=utf-8" }],
+  ["/webrtc-transport.js", { path: `${root}/dist/src/webrtc-transport.js`, type: "text/javascript; charset=utf-8" }],
 ]);
 
 const server = createServer(async (request, response) => {
+  if (request.url === "/favicon.ico") {
+    response.writeHead(204, { "Cache-Control": "no-store" }).end();
+    return;
+  }
   const asset = assets.get(request.url ?? "");
   if (!asset) {
     response.writeHead(404).end("Not found");

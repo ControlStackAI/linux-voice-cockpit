@@ -4,6 +4,7 @@ export interface WebRtcTransportCallbacks {
   onEvent(raw: string): void | Promise<void>;
   onRemoteStream?(stream: MediaStream): void;
   onConnectionState?(state: RTCPeerConnectionState): void;
+  onMicrophoneState?(state: "requesting" | "granted"): void;
   exchangeOffer?(sdp: string): Promise<string>;
 }
 
@@ -27,6 +28,7 @@ export class WebRtcTransport implements RealtimeChannel {
         this.callbacks.onConnectionState?.(peer.connectionState);
       });
 
+      this.callbacks.onMicrophoneState?.("requesting");
       this.#media = await navigator.mediaDevices.getUserMedia({
         audio: {
           autoGainControl: true,
@@ -35,6 +37,7 @@ export class WebRtcTransport implements RealtimeChannel {
           ...constraints,
         },
       });
+      this.callbacks.onMicrophoneState?.("granted");
       for (const track of this.#media.getAudioTracks()) peer.addTrack(track, this.#media);
 
       const channel = peer.createDataChannel("oai-events");
