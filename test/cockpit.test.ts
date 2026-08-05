@@ -157,7 +157,14 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
       expires: 1, accountId: "acct-test",
     },
   } }));
-  const calls: Array<{ url: string; authorization: string | null; account: string | null; body: string }> = [];
+  const calls: Array<{
+    url: string;
+    authorization: string | null;
+    account: string | null;
+    contentType: string | null;
+    protocol: string | null;
+    body: string;
+  }> = [];
   const fakeFetch: typeof fetch = async (input, init) => {
     const url = String(input);
     const headers = new Headers(init?.headers);
@@ -165,6 +172,8 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
       url,
       authorization: headers.get("Authorization"),
       account: headers.get("ChatGPT-Account-ID"),
+      contentType: headers.get("Content-Type"),
+      protocol: headers.get("OpenAI-Alpha"),
       body: String(init?.body ?? ""),
     });
     if (url.includes("/oauth/token")) return new Response(JSON.stringify({
@@ -181,7 +190,42 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
   assert.equal(calls[1]!.url, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
   assert.equal(calls[1]!.authorization, "Bearer access-new");
   assert.equal(calls[1]!.account, "acct-test");
-  assert.equal(calls[1]!.body, "offer-sdp\r\n");
+  assert.equal(calls[1]!.contentType, "application/json");
+  assert.equal(calls[1]!.protocol, "quicksilver=v1");
+  assert.deepEqual(JSON.parse(calls[1]!.body), {
+    sdp: "offer-sdp\r\n",
+    session: {
+      type: "quicksilver",
+      model: "gpt-realtime",
+      instructions: "",
+      audio: {
+        input: { format: { type: "audio/pcm", rate: 24_000 } },
+        output: { voice: "cove" },
+      },
+    },
+  });
   const persisted = JSON.parse(await readFile(storePath, "utf8"));
   assert.equal(persisted.profiles["openai:default"].refresh, "refresh-new");
+});
+
+test("GPT Live admission errors expose bounded sanitized provider detail", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-error-"));
+  const storePath = join(directory, "auth-profiles.json");
+  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
+    "openai:default": {
+      type: "oauth", provider: "openai", access: "current", refresh: "refresh",
+      expires: Date.now() + 3_600_000, accountId: "acct-test",
+    },
+  } }));
+  const broker = new OpenClawOAuthRealtime({
+    location: { kind: "json", path: storePath },
+    fetch: async () => new Response(`bad\nrequest ${"x".repeat(1_000)}`, { status: 400 }),
+  });
+
+  await assert.rejects(
+    broker.createCall("offer-sdp"),
+    (error: Error) => error.message.startsWith("ChatGPT GPT Live admission failed (400): bad request ")
+      && !error.message.includes("\n")
+      && error.message.length <= 860,
+  );
 });

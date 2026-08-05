@@ -5,6 +5,21 @@ const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const GPT_LIVE_CALL_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas";
 const REFRESH_SKEW_MS = 60_000;
+const MAX_ERROR_BODY_CHARS = 800;
+
+const DEFAULT_REALTIME_SESSION = {
+  type: "quicksilver",
+  model: "gpt-realtime",
+  instructions: "",
+  audio: {
+    input: {
+      format: { type: "audio/pcm", rate: 24_000 },
+    },
+    output: {
+      voice: "cove",
+    },
+  },
+} as const;
 
 interface OAuthProfile {
   type: "oauth";
@@ -44,14 +59,21 @@ export class OpenClawOAuthRealtime {
 
     const response = await this.#fetch(GPT_LIVE_CALL_URL, {
       method: "POST",
-      body: sdpOffer,
+      body: JSON.stringify({
+        sdp: sdpOffer,
+        session: DEFAULT_REALTIME_SESSION,
+      }),
       headers: {
         Authorization: `Bearer ${usable.access}`,
         "ChatGPT-Account-ID": accountId,
-        "Content-Type": "application/sdp",
+        "Content-Type": "application/json",
+        "OpenAI-Alpha": "quicksilver=v1",
       },
     });
-    if (!response.ok) throw new Error(`ChatGPT GPT Live admission failed (${response.status})`);
+    if (!response.ok) {
+      const detail = sanitizeErrorBody(await response.text());
+      throw new Error(`ChatGPT GPT Live admission failed (${response.status})${detail ? `: ${detail}` : ""}`);
+    }
     return response.text();
   }
 
@@ -94,6 +116,14 @@ export class OpenClawOAuthRealtime {
     await writeStore(this.options.location, store);
     return refreshed;
   }
+}
+
+function sanitizeErrorBody(body: string): string {
+  return body
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_ERROR_BODY_CHARS);
 }
 
 async function readStore(location: OAuthProfileLocation): Promise<AuthStore> {
