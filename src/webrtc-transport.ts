@@ -4,6 +4,7 @@ export interface WebRtcTransportCallbacks {
   onEvent(raw: string): void | Promise<void>;
   onRemoteStream?(stream: MediaStream): void;
   onConnectionState?(state: RTCPeerConnectionState): void;
+  exchangeOffer?(sdp: string): Promise<string>;
 }
 
 export class WebRtcTransport implements RealtimeChannel {
@@ -45,6 +46,11 @@ export class WebRtcTransport implements RealtimeChannel {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
       if (!offer.sdp) throw new Error("Browser did not produce an SDP offer");
+      if (launch.sdpExchange === "server-proxy") {
+        if (!this.callbacks.exchangeOffer) throw new Error("Server-mediated SDP exchange is unavailable");
+        await peer.setRemoteDescription({ type: "answer", sdp: await this.callbacks.exchangeOffer(offer.sdp) });
+        return;
+      }
       const response = await fetch(launch.offerUrl ?? "https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         body: offer.sdp,

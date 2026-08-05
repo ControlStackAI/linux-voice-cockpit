@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 import { GatewayWebSocketClient } from "./gateway-websocket-client.js";
+import { OpenClawOAuthRealtime, type OAuthProfileLocation } from "./openclaw-oauth-realtime.js";
 
 interface LocalRequest {
   id: string;
@@ -20,7 +21,23 @@ const allowedMethods = new Set([
   "talk.client.create",
   "talk.client.toolCall",
   "talk.client.steer",
+  "cockpit.realtime.createCall",
 ]);
+const authMode = process.env.COCKPIT_REALTIME_AUTH_MODE ?? "openclaw-oauth";
+const allowApiKeyFallback = process.env.COCKPIT_ALLOW_API_KEY_FALLBACK === "true";
+const authStorePath = process.env.COCKPIT_OPENCLAW_AUTH_STORE
+  ?? `${process.env.HOME}/.openclaw/agents/main/agent/openclaw-agent.sqlite`;
+const authLocation: OAuthProfileLocation = {
+  kind: authStorePath.endsWith(".json") ? "json" : "sqlite",
+  path: authStorePath,
+  ...(process.env.COCKPIT_OPENCLAW_AUTH_PROFILE
+    ? { profileId: process.env.COCKPIT_OPENCLAW_AUTH_PROFILE }
+    : {}),
+};
+if (authMode !== "openclaw-oauth" && !(authMode === "gateway-talk" && allowApiKeyFallback)) {
+  throw new Error("API-key/Gateway Talk mode requires COCKPIT_ALLOW_API_KEY_FALLBACK=true");
+}
+const oauthRealtime = new OpenClawOAuthRealtime({ location: authLocation });
 if (!gatewayToken) {
   throw new Error("OPENCLAW_GATEWAY_TOKEN is required; it is never sent to the browser");
 }
@@ -73,7 +90,9 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
       try {
         request = JSON.parse(String(raw)) as LocalRequest;
         assertAllowedRequest(request);
-        const payload = await gateway.request(request.method, request.params ?? {});
+        const payload = request.method === "cockpit.realtime.createCall"
+          ? await oauthRealtime.createCall(String(request.params?.sdp ?? ""))
+          : await gateway.request(request.method, request.params ?? {});
         browser.send(JSON.stringify({ type: "response", id: request.id, ok: true, payload }));
       } catch (error) {
         browser.send(JSON.stringify({

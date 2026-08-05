@@ -1,13 +1,13 @@
 # Linux Voice Cockpit
 
 Linux-first realtime voice cockpit for OpenClaw. The initial implementation is a typed,
-headless control plane for the supported OpenClaw Talk + OpenAI Realtime WebRTC path.
+headless control plane for ChatGPT Codex GPT Live plus OpenClaw agent consult/control.
 
 ## Current slice
 
-- discovers Realtime readiness through `talk.catalog`;
-- mints ephemeral sessions with `talk.client.create`;
-- connects browser/Tauri WebRTC without exposing a durable OpenAI key;
+- discovers and refreshes OpenClaw's OpenAI OAuth profile server-side;
+- admits GPT Live through ChatGPT's Codex realtime endpoint with the selected account ID;
+- connects browser/Tauri WebRTC without exposing OAuth or Gateway credentials;
 - bridges `openclaw_agent_consult` and `openclaw_agent_control` tool calls;
 - publishes a redacted state model suitable for desktop and phone clients;
 - closes microphone, data-channel, peer, and in-memory session state explicitly.
@@ -25,13 +25,13 @@ OPENCLAW_GATEWAY_TOKEN='...' npm run canary
 # open http://127.0.0.1:4280 and click Start microphone
 ```
 
-The service accepts only same-origin WebSocket clients, only the four required Talk RPCs,
+The service accepts only same-origin WebSocket clients, only the required control methods,
 and only `COCKPIT_SESSION_KEY` (default: this project's canonical session). The browser
-receives the ephemeral Realtime secret, never the Gateway token or durable provider auth.
+receives only SDP/session material, never the Gateway token or provider OAuth material.
 
-The current host's Talk path is still API-key-backed because its declarative config and
-Gateway environment provide `OPENAI_API_KEY`. ChatGPT/Codex OAuth subscription billing is
-therefore **not proven**; see `docs/live-linux-canary.md`.
+Gateway Talk/API-key mode is disabled unless explicitly enabled as fallback/test coverage.
+ChatGPT subscription billing remains **unproven until the live endpoint and account-side
+evidence pass**; see `docs/live-linux-canary.md`.
 
 Linux-first realtime voice and session-control client for OpenClaw.
 

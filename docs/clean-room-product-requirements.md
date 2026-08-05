@@ -145,8 +145,8 @@ record the app version and timestamp, and tag each result `BLACK-BOX`.
 - Public product claims do not prove protocol compatibility; only controlled black-box testing
   can establish what the installed iPhone build actually sends and accepts.
 - The stability and publication status of any protocol are unknown.
-- Whether ChatGPT subscription OAuth may be reused by a third-party Linux client requires a
-  separate policy and security review.
+- Subscription mode uses server-side OpenClaw OAuth and ChatGPT Codex realtime admission;
+  live endpoint and account-side billing evidence remain required before calling it proven.
 - Contacting the upstream developer is an external action and remains blocked until Matt gives
   explicit approval. Proposed questions: licensing intent, availability of protocol docs, and
   willingness to support a clean-room Linux companion.
@@ -163,6 +163,8 @@ record the app version and timestamp, and tag each result `BLACK-BOX`.
 
 - [x] Initial desktop, voice, session-control, file, and remote-access requirements recorded.
 - [x] Provenance vocabulary and source register established.
+- [x] Explicit `openclaw-oauth` design and API-key fallback gate recorded.
+- [ ] Live ChatGPT GPT Live endpoint and subscription-account evidence recorded.
 - [x] Unknowns and current legal boundary explicit.
 - [ ] Installed iPhone app black-box observations captured.
 - [ ] Upstream licensing/protocol questions sent after Matt explicitly approves outreach.

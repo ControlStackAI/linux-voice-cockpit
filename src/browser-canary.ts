@@ -102,6 +102,10 @@ start.addEventListener("click", async () => {
         if (state === "connected") cockpit.setPhase("listening");
         if (state === "failed" || state === "disconnected") cockpit.fail(`WebRTC ${state}`);
       },
+      exchangeOffer: (sdp) => gateway.request<string>("cockpit.realtime.createCall", {
+        sessionKey: session.value,
+        sdp,
+      }),
     });
     activeBridge = new RealtimeEventBridge(cockpit, transport);
     bridge = activeBridge;

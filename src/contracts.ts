@@ -29,6 +29,7 @@ export interface TalkCatalog {
 }
 
 export interface TalkWebRtcLaunch {
+  authMode?: "gateway-talk" | "openclaw-oauth";
   provider: string;
   transport: "webrtc";
   clientSecret: string;
@@ -37,6 +38,7 @@ export interface TalkWebRtcLaunch {
   model?: string;
   voice?: string;
   expiresAt?: number;
+  sdpExchange?: "client-secret" | "server-proxy";
 }
 
 export interface ToolCallAccepted {

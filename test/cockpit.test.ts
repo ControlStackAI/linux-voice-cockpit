@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CockpitController,
   RealtimeEventBridge,
   type GatewayClient,
   type GatewayEvent,
   type RealtimeChannel,
+  OpenClawOAuthRealtime,
 } from "../src/index.js";
 
 class FakeGateway implements GatewayClient {
@@ -47,18 +51,24 @@ class FakeChannel implements RealtimeChannel {
   send(event: Record<string, unknown>): void { this.events.push(event); }
 }
 
-test("mints a WebRTC session through the supported Talk boundary", async () => {
+test("uses server-mediated OpenClaw OAuth by default", async () => {
   const gateway = new FakeGateway();
   const cockpit = new CockpitController(gateway);
   const launch = await cockpit.createVoiceSession("agent:main:test");
 
-  assert.equal(launch.clientSecret, "ephemeral-test-only");
-  assert.equal(cockpit.state.model, "gpt-realtime-2.1");
-  assert.deepEqual(gateway.requests.map((request) => request.method), [
-    "talk.catalog",
-    "talk.client.create",
-  ]);
+  assert.equal(launch.authMode, "openclaw-oauth");
+  assert.equal(launch.sdpExchange, "server-proxy");
+  assert.deepEqual(gateway.requests, []);
   assert.equal(JSON.stringify(cockpit.state).includes(launch.clientSecret), false);
+});
+
+test("Gateway Talk is an explicit fallback path", async () => {
+  const gateway = new FakeGateway();
+  const cockpit = new CockpitController(gateway);
+  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk");
+  assert.equal(launch.clientSecret, "ephemeral-test-only");
+  assert.equal(launch.authMode, "gateway-talk");
+  assert.deepEqual(gateway.requests.map((request) => request.method), ["talk.catalog", "talk.client.create"]);
 });
 
 test("bridges a fragmented consult tool call and returns the final result", async () => {
@@ -136,4 +146,42 @@ test("stop removes all session metadata", async () => {
     activeToolCallId: null,
     lastError: null,
   });
+});
+
+test("OAuth refresh and GPT Live admission stay server-side", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-"));
+  const storePath = join(directory, "auth-profiles.json");
+  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
+    "openai:default": {
+      type: "oauth", provider: "openai", access: "expired", refresh: "refresh-old",
+      expires: 1, accountId: "acct-test",
+    },
+  } }));
+  const calls: Array<{ url: string; authorization: string | null; account: string | null; body: string }> = [];
+  const fakeFetch: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    calls.push({
+      url,
+      authorization: headers.get("Authorization"),
+      account: headers.get("ChatGPT-Account-ID"),
+      body: String(init?.body ?? ""),
+    });
+    if (url.includes("/oauth/token")) return new Response(JSON.stringify({
+      access_token: "access-new", refresh_token: "refresh-new", expires_in: 3600,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+    return new Response("answer-sdp", { status: 200 });
+  };
+  const broker = new OpenClawOAuthRealtime({
+    location: { kind: "json", path: storePath }, fetch: fakeFetch, now: () => 10_000,
+  });
+
+  assert.equal(await broker.createCall("offer-sdp\r\n"), "answer-sdp");
+  assert.match(calls[0]!.body, /grant_type=refresh_token/);
+  assert.equal(calls[1]!.url, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
+  assert.equal(calls[1]!.authorization, "Bearer access-new");
+  assert.equal(calls[1]!.account, "acct-test");
+  assert.equal(calls[1]!.body, "offer-sdp\r\n");
+  const persisted = JSON.parse(await readFile(storePath, "utf8"));
+  assert.equal(persisted.profiles["openai:default"].refresh, "refresh-new");
 });

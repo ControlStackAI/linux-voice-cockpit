@@ -33,12 +33,23 @@ export class CockpitController {
     return () => this.#listeners.delete(listener);
   }
 
-  async createVoiceSession(sessionKey: string): Promise<TalkWebRtcLaunch> {
+  async createVoiceSession(sessionKey: string, authMode: "gateway-talk" | "openclaw-oauth" = "openclaw-oauth"): Promise<TalkWebRtcLaunch> {
     const target = sessionKey.trim();
     if (!target) throw new Error("A non-empty OpenClaw sessionKey is required");
 
     this.patch({ phase: "connecting", sessionKey: target, lastError: null });
     try {
+      if (authMode === "openclaw-oauth") {
+        const launch: TalkWebRtcLaunch = {
+          authMode,
+          provider: "openai",
+          transport: "webrtc",
+          clientSecret: "server-mediated",
+          sdpExchange: "server-proxy",
+        };
+        this.patch({ startedAt: new Date().toISOString() });
+        return launch;
+      }
       const catalog = await this.gateway.request<TalkCatalog>("talk.catalog", {});
       const provider = catalog.realtime?.providers?.find((item) => item.id === "openai");
       if (!catalog.realtime?.ready || !provider?.configured) {
@@ -55,6 +66,8 @@ export class CockpitController {
         transport: "webrtc",
         brain: "agent-consult",
       });
+      launch.authMode = "gateway-talk";
+      launch.sdpExchange = "client-secret";
       if (launch.transport !== "webrtc" || !launch.clientSecret) {
         throw new Error("Gateway returned an invalid Realtime WebRTC launch");
       }

@@ -42,8 +42,8 @@ Phone/PWA ---- Tailscale ---- Voice Cockpit service ---- OpenClaw Gateway
 1. **Cockpit service**
    - Long-lived background process managed by `systemd --user`.
    - Owns the paired OpenClaw device identity and Gateway connection.
-   - Calls `talk.catalog`, `talk.client.create`, `talk.client.toolCall`, and
-     `talk.client.steer`.
+   - Discovers/refreshes OpenClaw OAuth, mediates ChatGPT GPT Live admission, and calls
+     `talk.client.toolCall` plus `talk.client.steer`.
    - Correlates voice sessions, OpenClaw `sessionKey`, runs, tool calls, approvals, and
      artifacts.
    - Exposes a small authenticated local IPC/API to the desktop UI and Agentic Desktop HUD.
@@ -52,7 +52,7 @@ Phone/PWA ---- Tailscale ---- Voice Cockpit service ---- OpenClaw Gateway
 2. **Tauri desktop app**
    - Owns PipeWire device selection, microphone UX, WebRTC, playback, transcript rendering,
      and interactive confirmations.
-   - Receives only the short-lived Realtime `clientSecret`; it never receives durable
+   - Receives only SDP/session material; it never receives durable
      OpenAI or OpenClaw credentials.
    - Uses the shared workspace UI component library and semantic design tokens.
 
@@ -158,7 +158,8 @@ Goal: a testable control plane before polishing the desktop.
 - Scaffold the service, typed IPC, structured logs, config validation, and test harness.
 - Pair to OpenClaw using a device identity and reconnect with bounded backoff.
 - List projects/sessions and bind a voice session to one exact `sessionKey`.
-- Implement `talk.catalog` readiness and `talk.client.create` ephemeral-secret minting.
+- Implement explicit OpenClaw OAuth profile discovery/refresh and server-mediated ChatGPT
+  GPT Live SDP admission. Keep `talk.client.create` behind an explicit fallback toggle.
 - Implement tool-call correlation, final-result return, steering, cancellation, and timeout.
 - Emit a redacted state projection for all UI consumers.
 
@@ -243,11 +244,11 @@ Linear: CON-208, CON-209, CON-207.
 
 The fastest useful sequence is:
 
-1. Finish the real OpenClaw Talk microphone canary.
+1. Finish the real ChatGPT GPT Live OAuth microphone canary.
 2. Commit ADRs for the service/UI/WebRTC boundary and PWA-first mobile strategy.
 3. Commit the threat model and exact-action confirmation contract.
 4. Scaffold the service and Tauri shell.
-5. Implement Gateway pairing, project/session selection, and `talk.client.create`.
+5. Implement Gateway pairing, project/session selection, and OAuth-backed GPT Live admission.
 6. Complete one direct conversation plus one agent consult and steering round trip.
 7. Only then build the polished transcript UI and Agentic Desktop chip.
 

@@ -6,38 +6,33 @@ Target: Linux Voice Cockpit and other trusted third-party OpenClaw clients
 
 ## Bottom line
 
-Do not obtain a ChatGPT/Codex OAuth token in the third-party app and do not copy one out
-of OpenClaw's credential store. Connect the app to the OpenClaw Gateway and use its Talk
-RPC contract:
+The primary mode is explicit `openclaw-oauth`, implemented by the trusted cockpit service:
 
 1. Authenticate and pair the app as an OpenClaw Gateway device.
-2. Read `talk.catalog` and require a ready OpenAI realtime provider.
-3. Call `talk.client.create` for the target OpenClaw `sessionKey`.
-4. Receive a short-lived OpenAI Realtime client secret from the Gateway.
-5. Use that secret once to establish a direct WebRTC session with OpenAI.
+2. Discover an OpenAI/openai-codex OAuth profile in OpenClaw's per-agent auth store.
+3. Refresh it server-side through `https://auth.openai.com/oauth/token` with the Codex client identity.
+4. Resolve the ChatGPT account ID from the stored profile or access-token claims.
+5. Proxy the browser's SDP offer to ChatGPT's Codex realtime admission endpoint with Bearer OAuth and `ChatGPT-Account-ID`.
 6. Forward the Realtime model's `openclaw_agent_consult` tool calls to
    `talk.client.toolCall`, then return the result through the WebRTC data channel.
 7. Use `talk.client.steer` to steer or cancel an active OpenClaw consult.
 
-This is the supported third-party boundary already used by OpenClaw's browser and iOS
-Talk clients. It gives the client low-latency provider audio without exposing the
-Gateway's durable API key or Codex OAuth bearer.
+Tokens remain in the service. The browser receives only the SDP answer/session material.
+The existing `talk.client.create` API-key path is retained only as an explicitly enabled
+fallback/test mode; credential precedence must never silently substitute an API key.
 
 ## What “GPT Live” means here
 
 Three related paths are easy to conflate:
 
-- **OpenAI Realtime API:** the public, supported speech-to-speech API. In OpenClaw
-  `v2026.7.1-2`, the configured default on this host is `gpt-realtime-2.1` over
-  client-owned WebRTC. This is the production path Linux Voice Cockpit should build.
+- **ChatGPT Codex GPT Live:** the subscription-mode target, admitted through
+  `/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas` with Codex OAuth.
 - **OpenClaw Talk with agent consult:** OpenAI Realtime handles the live audio loop and
   can call `openclaw_agent_consult`. The Gateway executes that consult through the
   selected OpenClaw session, including its tools and policy, and the Realtime model
   speaks the returned result.
-- **Codex GPT-Live / Frameless Bidi:** a separate Codex-owned conversation surface with
-  private model identifiers and admission. Voice.Claw's published research recorded
-  `Voice session access denied` or unavailable routes for its V3 tests. It must remain
-  capability-gated and must not be presented as the working public Realtime path.
+- **OpenAI Platform Realtime API:** the API-key-backed fallback/test path. It is not the
+  acceptance path for ChatGPT subscription mode.
 
 Codex-OAuth GPT Live is also not a general OpenClaw tool surface. The production
 architecture below is the tool-capable route.
@@ -45,19 +40,17 @@ architecture below is the tool-capable route.
 ## Reference architecture
 
 ```text
-Linux Voice Cockpit
-  |  authenticated Gateway WebSocket
-  |  talk.catalog / talk.client.create / talk.client.toolCall / talk.client.steer
-  v
-OpenClaw Gateway
-  |  resolves provider credential (API key or Codex OAuth)
-  |  mints short-lived Realtime client secret
-  |  runs agent consults in the requested OpenClaw session
-  v
-OpenAI Realtime API <------ WebRTC audio + oai-events data channel ------ Cockpit
+Browser/WebView -- SDP offer --> trusted cockpit service
+                              | reads/refreshes OpenClaw OAuth store
+                              | Bearer OAuth + ChatGPT-Account-ID
+                              v
+                     ChatGPT Codex realtime admission
+Browser/WebView <-- SDP answer -- cockpit service
+Browser/WebView -- WebRTC + events --> GPT Live
+Browser/WebView -- toolCall / steer --> OpenClaw Gateway
 ```
 
-The media plane is client-to-OpenAI WebRTC. The control and tool plane is an
+After server-mediated admission, the media plane is client-to-provider WebRTC. The control and tool plane is an
 authenticated connection to OpenClaw. A remote phone can reach the Gateway through
 Tailscale, but the ephemeral OpenAI session still connects directly from the phone.
 
@@ -82,9 +75,9 @@ The Gateway must have a usable OpenAI realtime provider. A minimal shape is:
 }
 ```
 
-OpenClaw can resolve the provider credential from a configured OpenAI API-key source or
-from an OpenAI/Codex OAuth profile. The third-party app should not know which source was
-used. `provider-direct` is intentional for the GPT-Live-style experience: the Realtime
+The cockpit service resolves only an OAuth profile in primary mode. API-key substitution
+is forbidden unless `COCKPIT_ALLOW_API_KEY_FALLBACK=true` and the caller explicitly selects
+`gateway-talk`. `provider-direct` is intentional for the GPT-Live-style experience: the Realtime
 provider answers ordinary conversation directly and calls OpenClaw only when it needs an
 agent/tool consult. `force-agent-consult` sends every finalized utterance through the
 agent and changes both latency and cost.
@@ -109,7 +102,13 @@ For a remote client:
 
 ## Session bootstrap
 
-First discover the runtime instead of hard-coding provider capabilities:
+In `openclaw-oauth` mode, bootstrap does not call `talk.client.create`: its current
+credential precedence can select an API key and defeat the billing/auth requirement.
+The service opens the agent's SQLite `auth_profile_store` (or legacy
+`auth-profiles.json`), selects an `openai`/`openai-codex` OAuth entry, refreshes it when
+needed, and keeps both access and refresh tokens server-side.
+
+The following legacy discovery flow applies only to explicit `gateway-talk` fallback:
 
 ```ts
 const catalog = await gateway.request("talk.catalog", {});
@@ -290,18 +289,18 @@ reports OpenAI ready, `gpt-realtime-2.1`, WebRTC support, barge-in, and tool cal
 
 ## Verification plan
 
-1. Connect a paired test client and confirm `talk.catalog` advertises OpenAI WebRTC.
-2. Call `talk.client.create`; assert the result contains an ephemeral secret but no durable
-   API key or OAuth token.
+1. Load an OpenAI OAuth profile from the OpenClaw store and refresh it without exposing tokens.
+2. Send SDP to the ChatGPT Codex realtime endpoint with Bearer OAuth and the expected account ID;
+   verify no API key is present and capture attributable account-side evidence.
 3. Complete SDP exchange and verify microphone audio, output audio, final user transcript,
    assistant transcript, and barge-in.
 4. Trigger `openclaw_agent_consult`; verify the exact selected `sessionKey` receives the
    turn and the result returns through `function_call_output`.
 5. Steer and cancel a long consult from speech; verify ownership enforcement.
 6. Revoke the paired device and prove it can no longer mint a session.
-7. Expire or invalidate a client secret and verify clean re-minting without secret logs.
-8. Inspect network traffic: Gateway control stays on the private authenticated path and
-   WebRTC goes only to the advertised OpenAI endpoint.
+7. Expire the OAuth access token and verify refresh-token rotation is persisted without secret logs.
+8. Inspect network traffic: Gateway control stays private, OAuth/admission stays service-side,
+   and the browser receives no bearer, refresh token, API key, or account header.
 9. Measure first-audio latency, interruption latency, idle billing behavior, and recovery
    across Wi-Fi/Tailscale transitions.
 
