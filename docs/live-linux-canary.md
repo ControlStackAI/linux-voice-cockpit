@@ -28,7 +28,22 @@ The in-app browser was unavailable in the implementing session. Real microphone 
 SDP exchange, output audio, consult, steering, cancellation, and teardown must still be
 run interactively before this milestone is called complete.
 
+The browser availability check was repeated after the 2026-08-04 Gateway restart and again
+returned no controllable browser instance. This is an environment/test-harness blocker, not a
+passing or failing result for the cockpit client.
+
 ## Credential and billing finding
+
+OpenAI's public WebRTC documentation describes the supported third-party flow as a backend
+minting the ephemeral client secret with a **standard OpenAI API key**. It does not document
+ChatGPT/Codex OAuth or ChatGPT subscription billing for third-party Realtime sessions:
+<https://developers.openai.com/api/docs/guides/realtime-webrtc#connecting-using-an-ephemeral-token>.
+
+OpenClaw v2026.7.1-2 separately implements an OAuth/external-Codex fallback for Talk. That is
+an OpenClaw capability, not public OpenAI documentation that Realtime usage is included in a
+ChatGPT subscription. Keep these claims separate: an OAuth-only mint can prove the OpenClaw
+fallback authenticates, but subscription billing is proven only by account-side usage evidence
+attributable to the canary session.
 
 OpenClaw v2026.7.1-2 resolves Realtime platform auth in this order:
 
@@ -37,7 +52,7 @@ OpenClaw v2026.7.1-2 resolves Realtime platform auth in this order:
 3. `OPENAI_API_KEY`
 4. OpenAI OAuth profile or external Codex login
 
-The live host currently has both a Talk `apiKey` SecretRef targeting `OPENAI_API_KEY` and
+The live host at the time of the backend canary had both a Talk `apiKey` SecretRef targeting `OPENAI_API_KEY` and
 `OPENAI_API_KEY` in the Gateway process environment. The successful session mint was
 therefore Platform API-key-backed. It is not evidence that ChatGPT subscription billing
 works for Realtime, and no documentation or UI should claim otherwise.
