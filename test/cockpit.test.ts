@@ -10,6 +10,7 @@ import {
   type GatewayEvent,
   type RealtimeChannel,
   OpenClawOAuthRealtime,
+  cockpitContentSecurityPolicy,
 } from "../src/index.js";
 
 class FakeGateway implements GatewayClient {
@@ -45,6 +46,15 @@ class FakeGateway implements GatewayClient {
     for (const listener of this.listeners) listener(event);
   }
 }
+
+test("CSP exposes the OpenAI media endpoint only when API fallback is enabled", () => {
+  assert.match(cockpitContentSecurityPolicy(false), /connect-src 'self';/);
+  assert.doesNotMatch(cockpitContentSecurityPolicy(false), /api\.openai\.com/);
+  assert.match(
+    cockpitContentSecurityPolicy(true),
+    /connect-src 'self' https:\/\/api\.openai\.com;/,
+  );
+});
 
 class FakeChannel implements RealtimeChannel {
   readonly events: Record<string, unknown>[] = [];

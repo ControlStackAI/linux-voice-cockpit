@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 import { GatewayWebSocketClient } from "./gateway-websocket-client.js";
 import { OpenClawOAuthRealtime, type OAuthProfileLocation } from "./openclaw-oauth-realtime.js";
+import { cockpitContentSecurityPolicy } from "./content-security-policy.js";
 
 interface LocalRequest {
   id: string;
@@ -43,6 +44,7 @@ if (!gatewayToken) {
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
+const contentSecurityPolicy = cockpitContentSecurityPolicy(allowApiKeyFallback);
 const assets = new Map<string, { path: string; type: string }>([
   ["/", { path: `${root}/static/canary.html`, type: "text/html; charset=utf-8" }],
   ["/canary.js", { path: `${root}/dist/src/browser-canary.js`, type: "text/javascript; charset=utf-8" }],
@@ -65,7 +67,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(200, {
       "Content-Type": asset.type,
       "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self'; media-src 'self' blob:; style-src 'self' 'unsafe-inline'",
+      "Content-Security-Policy": contentSecurityPolicy,
       "Referrer-Policy": "no-referrer",
     });
     response.end(await readFile(asset.path));
