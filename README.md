@@ -11,14 +11,27 @@ headless control plane for the supported OpenClaw Talk + OpenAI Realtime WebRTC 
 - bridges `openclaw_agent_consult` and `openclaw_agent_control` tool calls;
 - publishes a redacted state model suitable for desktop and phone clients;
 - closes microphone, data-channel, peer, and in-memory session state explicitly.
+- runs a loopback-only canary service with an allowlisted Gateway RPC proxy.
 
 ```bash
 npm install
 npm test
 ```
 
-The concrete Gateway transport/device-pairing adapter and live microphone canary are the
-next implementation step. Architecture and security context live under `docs/`.
+To run the Linux microphone canary, load only the Gateway credential into the service:
+
+```bash
+OPENCLAW_GATEWAY_TOKEN='...' npm run canary
+# open http://127.0.0.1:4280 and click Start microphone
+```
+
+The service accepts only same-origin WebSocket clients, only the four required Talk RPCs,
+and only `COCKPIT_SESSION_KEY` (default: this project's canonical session). The browser
+receives the ephemeral Realtime secret, never the Gateway token or durable provider auth.
+
+The current host's Talk path is still API-key-backed because its declarative config and
+Gateway environment provide `OPENAI_API_KEY`. ChatGPT/Codex OAuth subscription billing is
+therefore **not proven**; see `docs/live-linux-canary.md`.
 
 Linux-first realtime voice and session-control client for OpenClaw.
 

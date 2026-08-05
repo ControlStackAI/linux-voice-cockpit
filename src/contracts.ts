@@ -54,6 +54,11 @@ export interface GatewayClient {
   subscribe(listener: (event: GatewayEvent) => void): () => void;
 }
 
+export interface GatewayConnection extends GatewayClient {
+  connect(): Promise<void>;
+  close(): Promise<void> | void;
+}
+
 export interface RealtimeChannel {
   send(event: Record<string, unknown>): void;
 }
