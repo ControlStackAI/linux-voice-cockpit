@@ -163,6 +163,11 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
     account: string | null;
     contentType: string | null;
     protocol: string | null;
+    accept: string | null;
+    originator: string | null;
+    sessionId: string | null;
+    threadId: string | null;
+    userAgent: string | null;
     body: string;
   }> = [];
   const fakeFetch: typeof fetch = async (input, init) => {
@@ -174,6 +179,11 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
       account: headers.get("ChatGPT-Account-ID"),
       contentType: headers.get("Content-Type"),
       protocol: headers.get("OpenAI-Alpha"),
+      accept: headers.get("Accept"),
+      originator: headers.get("Originator"),
+      sessionId: headers.get("Session-ID"),
+      threadId: headers.get("Thread-ID"),
+      userAgent: headers.get("User-Agent"),
       body: String(init?.body ?? ""),
     });
     if (url.includes("/oauth/token")) return new Response(JSON.stringify({
@@ -191,17 +201,21 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
   assert.equal(calls[1]!.authorization, "Bearer access-new");
   assert.equal(calls[1]!.account, "acct-test");
   assert.equal(calls[1]!.contentType, "application/json");
-  assert.equal(calls[1]!.protocol, "quicksilver=v1");
+  assert.equal(calls[1]!.protocol, "quicksilver=v2");
+  assert.equal(calls[1]!.accept, "application/sdp");
+  assert.equal(calls[1]!.originator, "linux_voice_cockpit");
+  assert.match(calls[1]!.sessionId!, /^[0-9a-f-]{36}$/);
+  assert.equal(calls[1]!.threadId, calls[1]!.sessionId);
+  assert.equal(calls[1]!.userAgent, "LinuxVoiceCockpit/0.1");
   assert.deepEqual(JSON.parse(calls[1]!.body), {
     sdp: "offer-sdp\r\n",
     session: {
-      type: "quicksilver",
-      model: "gpt-realtime",
+      model: "gpt-live-1-boulder-alpha",
       instructions: "",
       audio: {
-        input: { format: { type: "audio/pcm", rate: 24_000 } },
-        output: { voice: "cove" },
+        output: { voice: "ember" },
       },
+      delegation: { type: "client" },
     },
   });
   const persisted = JSON.parse(await readFile(storePath, "utf8"));

@@ -115,39 +115,54 @@ start.addEventListener("click", async () => {
   start.disabled = true;
   stop.disabled = false;
   try {
-    const launch = await cockpit.createVoiceSession(session.value);
-    let activeBridge: RealtimeEventBridge;
-    transport = new WebRtcTransport({
-      onEvent: (raw) => activeBridge.handle(raw),
-      onRemoteStream: (stream) => {
-        audio.srcObject = stream;
-        void audio.play();
-      },
-      onConnectionState: (state) => {
-        if (state === "connected") cockpit.setPhase("listening");
-        if (state === "failed" || state === "disconnected") cockpit.fail(`WebRTC ${state}`);
-      },
-      onMicrophoneState: (state) => {
-        if (state === "requesting") {
-          renderProgress("microphone permission", "Waiting for the browser permission prompt. Choose Allow to continue.");
-        } else {
-          renderProgress("microphone ready", "Access granted. Establishing the secure realtime audio connection.");
-        }
-      },
-      exchangeOffer: (sdp) => gateway.request<string>("cockpit.realtime.createCall", {
-        sessionKey: session.value,
-        sdp,
-      }),
-    });
-    activeBridge = new RealtimeEventBridge(cockpit, transport);
-    bridge = activeBridge;
-    bridge.start();
-    await transport.connect(launch);
+    try {
+      await connectVoice("openclaw-oauth");
+    } catch (error) {
+      if (!isSubscriptionAdmissionDenied(error)) throw error;
+      await teardown(false);
+      renderProgress(
+        "API fallback",
+        "ChatGPT subscription admission was denied. Connecting through the configured OpenAI Realtime API route.",
+      );
+      await connectVoice("gateway-talk");
+    }
   } catch (error) {
     cockpit.fail(describeStartError(error));
     await teardown(false);
   }
 });
+
+async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk"): Promise<void> {
+  const launch = await cockpit.createVoiceSession(session.value, authMode);
+  let activeBridge: RealtimeEventBridge;
+  const nextTransport = new WebRtcTransport({
+    onEvent: (raw) => activeBridge.handle(raw),
+    onRemoteStream: (stream) => {
+      audio.srcObject = stream;
+      void audio.play();
+    },
+    onConnectionState: (state) => {
+      if (state === "connected") cockpit.setPhase("listening");
+      if (state === "failed" || state === "disconnected") cockpit.fail(`WebRTC ${state}`);
+    },
+    onMicrophoneState: (state) => {
+      if (state === "requesting") {
+        renderProgress("microphone permission", "Waiting for the browser permission prompt. Choose Allow to continue.");
+      } else {
+        renderProgress("microphone ready", "Access granted. Establishing the secure realtime audio connection.");
+      }
+    },
+    exchangeOffer: (sdp) => gateway.request<string>("cockpit.realtime.createCall", {
+      sessionKey: session.value,
+      sdp,
+    }),
+  });
+  transport = nextTransport;
+  activeBridge = new RealtimeEventBridge(cockpit, nextTransport);
+  bridge = activeBridge;
+  bridge.start();
+  await nextTransport.connect(launch);
+}
 
 stop.addEventListener("click", () => void teardown());
 steer.addEventListener("click", async () => {
@@ -209,4 +224,9 @@ function describeStartError(error: unknown): Error {
     default:
       return new Error(`Microphone request failed (${error.name}): ${error.message}`);
   }
+}
+
+function isSubscriptionAdmissionDenied(error: unknown): boolean {
+  return error instanceof Error
+    && /ChatGPT GPT Live admission failed \((?:401|403|404)\)/.test(error.message);
 }

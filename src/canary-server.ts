@@ -97,6 +97,9 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
       try {
         request = JSON.parse(String(raw)) as LocalRequest;
         assertAllowedRequest(request);
+        if (request.method === "talk.client.create" && !allowApiKeyFallback) {
+          throw new Error("OpenAI Realtime API fallback is disabled by cockpit policy");
+        }
         const payload = request.method === "cockpit.realtime.createCall"
           ? await oauthRealtime.createCall(String(request.params?.sdp ?? ""))
           : await gateway.request(request.method, request.params ?? {});

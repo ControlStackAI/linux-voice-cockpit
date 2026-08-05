@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
@@ -8,17 +9,14 @@ const REFRESH_SKEW_MS = 60_000;
 const MAX_ERROR_BODY_CHARS = 800;
 
 const DEFAULT_REALTIME_SESSION = {
-  type: "quicksilver",
-  model: "gpt-realtime",
+  model: "gpt-live-1-boulder-alpha",
   instructions: "",
   audio: {
-    input: {
-      format: { type: "audio/pcm", rate: 24_000 },
-    },
     output: {
-      voice: "cove",
+      voice: "ember",
     },
   },
+  delegation: { type: "client" },
 } as const;
 
 interface OAuthProfile {
@@ -56,6 +54,7 @@ export class OpenClawOAuthRealtime {
       : profile;
     const accountId = usable.accountId ?? accountIdFromJwt(usable.access);
     if (!accountId) throw new Error("OpenClaw OAuth profile has no ChatGPT account ID");
+    const requestId = randomUUID();
 
     const response = await this.#fetch(GPT_LIVE_CALL_URL, {
       method: "POST",
@@ -67,7 +66,12 @@ export class OpenClawOAuthRealtime {
         Authorization: `Bearer ${usable.access}`,
         "ChatGPT-Account-ID": accountId,
         "Content-Type": "application/json",
-        "OpenAI-Alpha": "quicksilver=v1",
+        Accept: "application/sdp",
+        "OpenAI-Alpha": "quicksilver=v2",
+        Originator: "linux_voice_cockpit",
+        "Session-ID": requestId,
+        "Thread-ID": requestId,
+        "User-Agent": "LinuxVoiceCockpit/0.1",
       },
     });
     if (!response.ok) {
