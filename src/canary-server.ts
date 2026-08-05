@@ -1,10 +1,12 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 import { GatewayWebSocketClient } from "./gateway-websocket-client.js";
 import { OpenClawOAuthRealtime, type OAuthProfileLocation } from "./openclaw-oauth-realtime.js";
 import { cockpitContentSecurityPolicy } from "./content-security-policy.js";
+import { initialProjection, sanitizeProjection } from "./state-projection.js";
+import type { BrowserConfiguration, CockpitProjection } from "./contracts.js";
 
 interface LocalRequest {
   id: string;
@@ -26,6 +28,18 @@ const allowedMethods = new Set([
 ]);
 const authMode = process.env.COCKPIT_REALTIME_AUTH_MODE ?? "openclaw-oauth";
 const allowApiKeyFallback = process.env.COCKPIT_ALLOW_API_KEY_FALLBACK === "true";
+const browserConfiguration: BrowserConfiguration = {
+  subscription: {
+    model: preference("COCKPIT_SUBSCRIPTION_MODEL", "gpt-live-1-boulder-alpha"),
+    voice: preference("COCKPIT_SUBSCRIPTION_VOICE", "ember"),
+  },
+  api: {
+    model: preference("COCKPIT_API_MODEL", "gpt-realtime-2.1"),
+    voice: preference("COCKPIT_API_VOICE", "marin"),
+  },
+};
+const statePath = process.env.COCKPIT_STATE_PATH
+  ?? `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}/linux-voice-cockpit.json`;
 const authStorePath = process.env.COCKPIT_OPENCLAW_AUTH_STORE
   ?? `${process.env.HOME}/.openclaw/agents/main/agent/openclaw-agent.sqlite`;
 const authLocation: OAuthProfileLocation = {
@@ -38,7 +52,11 @@ const authLocation: OAuthProfileLocation = {
 if (authMode !== "openclaw-oauth" && !(authMode === "gateway-talk" && allowApiKeyFallback)) {
   throw new Error("API-key/Gateway Talk mode requires COCKPIT_ALLOW_API_KEY_FALLBACK=true");
 }
-const oauthRealtime = new OpenClawOAuthRealtime({ location: authLocation });
+const oauthRealtime = new OpenClawOAuthRealtime({
+  location: authLocation,
+  model: browserConfiguration.subscription.model,
+  voice: browserConfiguration.subscription.voice,
+});
 if (!gatewayToken) {
   throw new Error("OPENCLAW_GATEWAY_TOKEN is required; it is never sent to the browser");
 }
@@ -53,7 +71,43 @@ const assets = new Map<string, { path: string; type: string }>([
   ["/webrtc-transport.js", { path: `${root}/dist/src/webrtc-transport.js`, type: "text/javascript; charset=utf-8" }],
 ]);
 
+let projection = initialProjection();
+let activeBrowser: WebSocket | null = null;
+let projectionWrite = Promise.resolve();
+queueProjectionWrite();
+
 const server = createServer(async (request, response) => {
+  if (request.method === "GET" && request.url === "/desktop/state") {
+    json(response, 200, projection);
+    return;
+  }
+  if (request.method === "POST" && request.url === "/desktop/control") {
+    if (!isLoopback(request.socket.remoteAddress)
+      || (request.headers.origin && request.headers.origin !== `http://${host}:${port}`)) {
+      json(response, 403, { error: "Desktop control is loopback-only" });
+      return;
+    }
+    if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      json(response, 415, { error: "Desktop control requires application/json" });
+      return;
+    }
+    try {
+      const body = JSON.parse(await readBody(request)) as { action?: unknown };
+      if (body.action !== "start" && body.action !== "stop") {
+        json(response, 400, { error: "Desktop control action must be start or stop" });
+        return;
+      }
+      if (!activeBrowser || activeBrowser.readyState !== WebSocket.OPEN) {
+        json(response, 409, { error: "No browser microphone owner is connected" });
+        return;
+      }
+      activeBrowser.send(JSON.stringify({ type: "desktop-control", action: body.action }));
+      json(response, 202, { accepted: true, action: body.action });
+    } catch (error) {
+      json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
   if (request.url === "/favicon.ico") {
     response.writeHead(204, { "Cache-Control": "no-store" }).end();
     return;
@@ -93,11 +147,20 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
   });
   try {
     await gateway.connect();
-    browser.send(JSON.stringify({ type: "ready" }));
+    activeBrowser = browser;
+    projection = { ...projection, browserConnected: true, updatedAt: new Date().toISOString() };
+    queueProjectionWrite();
+    browser.send(JSON.stringify({ type: "ready", configuration: browserConfiguration }));
     browser.on("message", async (raw) => {
       let request: LocalRequest | undefined;
       try {
-        request = JSON.parse(String(raw)) as LocalRequest;
+        const frame = JSON.parse(String(raw)) as Record<string, unknown>;
+        if (frame.type === "state") {
+          projection = sanitizeProjection(frame.state, true);
+          queueProjectionWrite();
+          return;
+        }
+        request = frame as unknown as LocalRequest;
         assertAllowedRequest(request);
         if (request.method === "talk.client.create" && !allowApiKeyFallback) {
           throw new Error("OpenAI Realtime API fallback is disabled by cockpit policy");
@@ -120,9 +183,60 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
     browser.close(1011, "Gateway connection failed");
   }
   browser.once("close", () => {
+    if (activeBrowser === browser) activeBrowser = null;
+    projection = {
+      ...projection,
+      phase: projection.phase === "idle" ? "idle" : "error",
+      error: projection.phase === "idle" ? null : "Browser microphone owner disconnected",
+      browserConnected: false,
+      updatedAt: new Date().toISOString(),
+    };
+    queueProjectionWrite();
     unsubscribe();
     void gateway.close();
   });
+}
+
+function preference(name: string, fallback: string): string {
+  return process.env[name]?.trim().slice(0, 120) || fallback;
+}
+
+function isLoopback(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function readBody(request: import("node:http").IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      body += chunk;
+      if (body.length > 4096) reject(new Error("Desktop control body is too large"));
+    });
+    request.on("end", () => resolve(body));
+    request.on("error", reject);
+  });
+}
+
+function json(response: import("node:http").ServerResponse, status: number, body: unknown): void {
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  }).end(`${JSON.stringify(body)}\n`);
+}
+
+function queueProjectionWrite(): void {
+  const snapshot: CockpitProjection = { ...projection };
+  projectionWrite = projectionWrite
+    .then(async () => {
+      const temporary = `${statePath}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, { mode: 0o600 });
+      await rename(temporary, statePath);
+    })
+    .catch((error) => {
+      process.stderr.write(`Failed to publish cockpit state: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
 }
 
 function assertAllowedRequest(request: LocalRequest): void {

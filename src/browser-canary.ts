@@ -1,7 +1,7 @@
 import { CockpitController } from "./cockpit-controller.js";
 import { RealtimeEventBridge } from "./realtime-event-bridge.js";
 import { WebRtcTransport } from "./webrtc-transport.js";
-import type { GatewayClient, GatewayEvent } from "./contracts.js";
+import type { BrowserConfiguration, CockpitState, GatewayClient, GatewayEvent } from "./contracts.js";
 
 interface PendingLocalRequest {
   resolve(value: unknown): void;
@@ -12,7 +12,8 @@ class LocalGatewayProxy implements GatewayClient {
   readonly #socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/control`);
   readonly #pending = new Map<string, PendingLocalRequest>();
   readonly #listeners = new Set<(event: GatewayEvent) => void>();
-  readonly ready: Promise<void>;
+  readonly #controlListeners = new Set<(action: "start" | "stop") => void>();
+  readonly ready: Promise<BrowserConfiguration>;
 
   constructor() {
     this.ready = new Promise((resolve, reject) => {
@@ -27,7 +28,11 @@ class LocalGatewayProxy implements GatewayClient {
         }
         if (frame.type === "ready") {
           settled = true;
-          resolve();
+          resolve(frame.configuration as unknown as BrowserConfiguration);
+          return;
+        }
+        if (frame.type === "desktop-control" && (frame.action === "start" || frame.action === "stop")) {
+          for (const listener of this.#controlListeners) listener(frame.action);
           return;
         }
         if (frame.type === "fatal") {
@@ -76,6 +81,28 @@ class LocalGatewayProxy implements GatewayClient {
     return () => this.#listeners.delete(listener);
   }
 
+  onControl(listener: (action: "start" | "stop") => void): () => void {
+    this.#controlListeners.add(listener);
+    return () => this.#controlListeners.delete(listener);
+  }
+
+  async publishState(state: Readonly<CockpitState>): Promise<void> {
+    await this.ready;
+    if (this.#socket.readyState !== WebSocket.OPEN) return;
+    this.#socket.send(JSON.stringify({
+      type: "state",
+      state: {
+        phase: state.phase,
+        transport: state.transport,
+        model: state.model,
+        voice: state.voice,
+        error: state.lastError,
+        connectedAt: state.connectedAt,
+        listeningAt: state.listeningAt,
+      },
+    }));
+  }
+
   close(): void {
     this.#socket.close(1000, "page shutdown");
   }
@@ -96,6 +123,7 @@ const audio = required<HTMLAudioElement>("remote-audio");
 
 let transport: WebRtcTransport | null = null;
 let bridge: RealtimeEventBridge | null = null;
+let startInFlight = false;
 
 cockpit.subscribe((state) => {
   status.textContent = state.phase;
@@ -107,16 +135,26 @@ cockpit.subscribe((state) => {
   statusPanel.dataset.tone = state.phase === "error" ? "error" : "neutral";
   start.disabled = state.phase !== "idle" && state.phase !== "error";
   stop.disabled = state.phase === "idle" || state.phase === "error";
+  void gateway.publishState(state);
 });
 
-start.addEventListener("click", async () => {
+start.addEventListener("click", () => void startVoice());
+gateway.onControl((action) => {
+  if (action === "start") void startVoice();
+  else void teardown();
+});
+
+async function startVoice(): Promise<void> {
+  if (startInFlight || (cockpit.state.phase !== "idle" && cockpit.state.phase !== "error")) return;
+  startInFlight = true;
   await teardown();
   renderProgress("preparing microphone", "Connecting to the local cockpit before requesting browser microphone access.");
   start.disabled = true;
   stop.disabled = false;
   try {
+    const configuration = await gateway.ready;
     try {
-      await connectVoice("openclaw-oauth");
+      await connectVoice("openclaw-oauth", configuration.subscription);
     } catch (error) {
       if (!isSubscriptionAdmissionDenied(error)) throw error;
       await teardown(false);
@@ -124,16 +162,18 @@ start.addEventListener("click", async () => {
         "API fallback",
         "ChatGPT subscription admission was denied. Connecting through the configured OpenAI Realtime API route.",
       );
-      await connectVoice("gateway-talk");
+      await connectVoice("gateway-talk", configuration.api);
     }
   } catch (error) {
     cockpit.fail(describeStartError(error));
     await teardown(false);
+  } finally {
+    startInFlight = false;
   }
-});
+}
 
-async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk"): Promise<void> {
-  const launch = await cockpit.createVoiceSession(session.value, authMode);
+async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk", preference: { model: string; voice: string }): Promise<void> {
+  const launch = await cockpit.createVoiceSession(session.value, authMode, preference);
   let activeBridge: RealtimeEventBridge;
   const nextTransport = new WebRtcTransport({
     onEvent: (raw) => activeBridge.handle(raw),
@@ -142,7 +182,10 @@ async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk"): Promis
       void audio.play();
     },
     onConnectionState: (state) => {
-      if (state === "connected") cockpit.setPhase("listening");
+      if (state === "connected") {
+        cockpit.markConnected();
+        cockpit.setPhase("listening");
+      }
       if (state === "failed" || state === "disconnected") cockpit.fail(`WebRTC ${state}`);
     },
     onMicrophoneState: (state) => {
@@ -152,10 +195,14 @@ async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk"): Promis
         renderProgress("microphone ready", "Access granted. Establishing the secure realtime audio connection.");
       }
     },
-    exchangeOffer: (sdp) => gateway.request<string>("cockpit.realtime.createCall", {
-      sessionKey: session.value,
-      sdp,
-    }),
+    exchangeOffer: async (sdp) => {
+      const call = await gateway.request<{ sdp: string; model: string; voice: string }>("cockpit.realtime.createCall", {
+        sessionKey: session.value,
+        sdp,
+      });
+      cockpit.setRoute(call.model, call.voice);
+      return call.sdp;
+    },
   });
   transport = nextTransport;
   activeBridge = new RealtimeEventBridge(cockpit, nextTransport);

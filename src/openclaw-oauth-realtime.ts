@@ -8,16 +8,8 @@ const GPT_LIVE_CALL_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?
 const REFRESH_SKEW_MS = 60_000;
 const MAX_ERROR_BODY_CHARS = 800;
 
-const DEFAULT_REALTIME_SESSION = {
-  model: "gpt-live-1-boulder-alpha",
-  instructions: "",
-  audio: {
-    output: {
-      voice: "ember",
-    },
-  },
-  delegation: { type: "client" },
-} as const;
+const PROVEN_MODEL = "gpt-live-1-boulder-alpha";
+const PROVEN_VOICE = "ember";
 
 interface OAuthProfile {
   type: "oauth";
@@ -35,6 +27,13 @@ export interface OpenClawOAuthRealtimeOptions {
   location: OAuthProfileLocation;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
+  model?: string;
+  voice?: string;
+}
+export interface OAuthRealtimeCall {
+  sdp: string;
+  model: string;
+  voice: string;
 }
 
 export class OpenClawOAuthRealtime {
@@ -46,7 +45,7 @@ export class OpenClawOAuthRealtime {
     this.#now = options.now ?? Date.now;
   }
 
-  async createCall(sdpOffer: string): Promise<string> {
+  async createCall(sdpOffer: string): Promise<OAuthRealtimeCall> {
     if (!sdpOffer.trim()) throw new Error("A non-empty SDP offer is required");
     const { store, profileId, profile } = await this.loadProfile();
     const usable = profile.expires <= this.#now() + REFRESH_SKEW_MS
@@ -56,14 +55,41 @@ export class OpenClawOAuthRealtime {
     if (!accountId) throw new Error("OpenClaw OAuth profile has no ChatGPT account ID");
     const requestId = randomUUID();
 
-    const response = await this.#fetch(GPT_LIVE_CALL_URL, {
+    let route = {
+      model: this.options.model ?? PROVEN_MODEL,
+      voice: this.options.voice ?? PROVEN_VOICE,
+    };
+    let response = await this.admit(usable.access, accountId, requestId, sdpOffer, route);
+    if (!response.ok && response.status === 400
+      && ((this.options.model && this.options.model !== PROVEN_MODEL)
+        || (this.options.voice && this.options.voice !== PROVEN_VOICE))) {
+      route = {
+        model: PROVEN_MODEL,
+        voice: PROVEN_VOICE,
+      };
+      response = await this.admit(usable.access, accountId, requestId, sdpOffer, route);
+    }
+    if (!response.ok) {
+      const detail = sanitizeErrorBody(await response.text());
+      throw new Error(`ChatGPT GPT Live admission failed (${response.status})${detail ? `: ${detail}` : ""}`);
+    }
+    return { sdp: await response.text(), ...route };
+  }
+
+  private admit(access: string, accountId: string, requestId: string, sdpOffer: string, route: { model: string; voice: string }): Promise<Response> {
+    return this.#fetch(GPT_LIVE_CALL_URL, {
       method: "POST",
       body: JSON.stringify({
         sdp: sdpOffer,
-        session: DEFAULT_REALTIME_SESSION,
+        session: {
+          model: route.model,
+          instructions: "",
+          audio: { output: { voice: route.voice } },
+          delegation: { type: "client" },
+        },
       }),
       headers: {
-        Authorization: `Bearer ${usable.access}`,
+        Authorization: `Bearer ${access}`,
         "ChatGPT-Account-ID": accountId,
         "Content-Type": "application/json",
         Accept: "application/sdp",
@@ -74,11 +100,6 @@ export class OpenClawOAuthRealtime {
         "User-Agent": "LinuxVoiceCockpit/0.1",
       },
     });
-    if (!response.ok) {
-      const detail = sanitizeErrorBody(await response.text());
-      throw new Error(`ChatGPT GPT Live admission failed (${response.status})${detail ? `: ${detail}` : ""}`);
-    }
-    return response.text();
   }
 
   private async loadProfile(): Promise<{ store: AuthStore; profileId: string; profile: OAuthProfile }> {

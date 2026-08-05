@@ -8,10 +8,13 @@ export type CockpitPhase =
 
 export interface CockpitState {
   phase: CockpitPhase;
+  transport: "subscription" | "api" | null;
   sessionKey: string | null;
   model: string | null;
   voice: string | null;
   startedAt: string | null;
+  connectedAt: string | null;
+  listeningAt: string | null;
   activeRunId: string | null;
   activeToolCallId: string | null;
   lastError: string | null;
@@ -73,3 +76,26 @@ export interface RealtimeToolCall {
 }
 
 export type StateListener = (state: Readonly<CockpitState>) => void;
+
+export interface VoiceRoutePreference {
+  model: string;
+  voice: string;
+}
+
+export interface BrowserConfiguration {
+  subscription: VoiceRoutePreference;
+  api: VoiceRoutePreference;
+}
+
+export interface CockpitProjection {
+  schemaVersion: 1;
+  phase: CockpitPhase;
+  transport: "subscription" | "api" | null;
+  model: string | null;
+  voice: string | null;
+  error: string | null;
+  connectedAt: string | null;
+  listeningAt: string | null;
+  browserConnected: boolean;
+  updatedAt: string;
+}

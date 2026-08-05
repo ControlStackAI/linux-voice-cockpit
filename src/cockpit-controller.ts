@@ -8,10 +8,13 @@ import type {
 
 const INITIAL_STATE: CockpitState = {
   phase: "idle",
+  transport: null,
   sessionKey: null,
   model: null,
   voice: null,
   startedAt: null,
+  connectedAt: null,
+  listeningAt: null,
   activeRunId: null,
   activeToolCallId: null,
   lastError: null,
@@ -33,11 +36,22 @@ export class CockpitController {
     return () => this.#listeners.delete(listener);
   }
 
-  async createVoiceSession(sessionKey: string, authMode: "gateway-talk" | "openclaw-oauth" = "openclaw-oauth"): Promise<TalkWebRtcLaunch> {
+  async createVoiceSession(
+    sessionKey: string,
+    authMode: "gateway-talk" | "openclaw-oauth" = "openclaw-oauth",
+    preference?: { model?: string; voice?: string },
+  ): Promise<TalkWebRtcLaunch> {
     const target = sessionKey.trim();
     if (!target) throw new Error("A non-empty OpenClaw sessionKey is required");
 
-    this.patch({ phase: "connecting", sessionKey: target, lastError: null });
+    this.patch({
+      phase: "connecting",
+      transport: authMode === "openclaw-oauth" ? "subscription" : "api",
+      sessionKey: target,
+      model: preference?.model ?? null,
+      voice: preference?.voice ?? null,
+      lastError: null,
+    });
     try {
       if (authMode === "openclaw-oauth") {
         const launch: TalkWebRtcLaunch = {
@@ -59,13 +73,28 @@ export class CockpitController {
         throw new Error("This Gateway does not advertise OpenAI WebRTC Talk");
       }
 
-      const launch = await this.gateway.request<TalkWebRtcLaunch>("talk.client.create", {
+      const params = {
         sessionKey: target,
         provider: "openai",
         mode: "realtime",
         transport: "webrtc",
         brain: "agent-consult",
-      });
+        ...(preference?.model ? { model: preference.model } : {}),
+        ...(preference?.voice ? { voice: preference.voice } : {}),
+      };
+      let launch: TalkWebRtcLaunch;
+      try {
+        launch = await this.gateway.request<TalkWebRtcLaunch>("talk.client.create", params);
+      } catch (error) {
+        if (!preference?.voice) throw error;
+        launch = await this.gateway.request<TalkWebRtcLaunch>("talk.client.create", {
+          sessionKey: target,
+          provider: "openai",
+          mode: "realtime",
+          transport: "webrtc",
+          brain: "agent-consult",
+        });
+      }
       launch.authMode = "gateway-talk";
       launch.sdpExchange = "client-secret";
       if (launch.transport !== "webrtc" || !launch.clientSecret) {
@@ -85,7 +114,21 @@ export class CockpitController {
   }
 
   setPhase(phase: CockpitState["phase"]): void {
-    this.patch({ phase, lastError: phase === "error" ? this.#state.lastError : null });
+    this.patch({
+      phase,
+      lastError: phase === "error" ? this.#state.lastError : null,
+      ...(phase === "listening" && !this.#state.listeningAt
+        ? { listeningAt: new Date().toISOString() }
+        : {}),
+    });
+  }
+
+  markConnected(): void {
+    if (!this.#state.connectedAt) this.patch({ connectedAt: new Date().toISOString() });
+  }
+
+  setRoute(model: string | null, voice: string | null): void {
+    this.patch({ model, voice });
   }
 
   setActiveTool(callId: string | null, runId: string | null): void {

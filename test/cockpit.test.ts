@@ -11,6 +11,8 @@ import {
   type RealtimeChannel,
   OpenClawOAuthRealtime,
   cockpitContentSecurityPolicy,
+  initialProjection,
+  sanitizeProjection,
 } from "../src/index.js";
 
 class FakeGateway implements GatewayClient {
@@ -75,10 +77,40 @@ test("uses server-mediated OpenClaw OAuth by default", async () => {
 test("Gateway Talk is an explicit fallback path", async () => {
   const gateway = new FakeGateway();
   const cockpit = new CockpitController(gateway);
-  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk");
+  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk", {
+    model: "gpt-realtime-2.1",
+    voice: "marin",
+  });
   assert.equal(launch.clientSecret, "ephemeral-test-only");
   assert.equal(launch.authMode, "gateway-talk");
   assert.deepEqual(gateway.requests.map((request) => request.method), ["talk.catalog", "talk.client.create"]);
+  assert.equal(gateway.requests[1]?.params.voice, "marin");
+  assert.equal(gateway.requests[1]?.params.model, "gpt-realtime-2.1");
+  assert.equal(cockpit.state.transport, "api");
+});
+
+test("Gateway Talk retries proven server defaults when a preferred voice is rejected", async () => {
+  class RejectingGateway extends FakeGateway {
+    override async request<T>(method: string, params: Record<string, unknown>): Promise<T> {
+      if (method === "talk.client.create" && params.voice) {
+        this.requests.push({ method, params });
+        throw new Error("voice not supported");
+      }
+      return super.request<T>(method, params);
+    }
+  }
+  const gateway = new RejectingGateway();
+  const cockpit = new CockpitController(gateway);
+  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk", {
+    model: "gpt-realtime-2.1",
+    voice: "preferred-female-voice",
+  });
+  assert.equal(launch.voice, "marin");
+  assert.deepEqual(gateway.requests.map((request) => [request.method, request.params.voice ?? null]), [
+    ["talk.catalog", null],
+    ["talk.client.create", "preferred-female-voice"],
+    ["talk.client.create", null],
+  ]);
 });
 
 test("bridges a fragmented consult tool call and returns the final result", async () => {
@@ -148,14 +180,51 @@ test("stop removes all session metadata", async () => {
 
   assert.deepEqual(cockpit.state, {
     phase: "idle",
+    transport: null,
     sessionKey: null,
     model: null,
     voice: null,
     startedAt: null,
+    connectedAt: null,
+    listeningAt: null,
     activeRunId: null,
     activeToolCallId: null,
     lastError: null,
   });
+});
+
+test("sanitized projection exposes only bounded shell-safe state", () => {
+  const now = new Date("2026-08-05T02:00:00.000Z");
+  assert.deepEqual(initialProjection(now), {
+    schemaVersion: 1,
+    phase: "idle",
+    transport: null,
+    model: null,
+    voice: null,
+    error: null,
+    connectedAt: null,
+    listeningAt: null,
+    browserConnected: false,
+    updatedAt: now.toISOString(),
+  });
+  const projected = sanitizeProjection({
+    phase: "listening",
+    transport: "subscription",
+    model: "gpt-live\nmodel",
+    voice: "ember",
+    error: `bad\u0000${"x".repeat(400)}`,
+    connectedAt: "2026-08-05T01:59:00Z",
+    listeningAt: "not-a-date",
+    clientSecret: "must-not-project",
+    sessionKey: "must-not-project",
+  }, true, now);
+  assert.equal(projected.model, "gpt-live model");
+  assert.equal(projected.error?.length, 240);
+  assert.equal(projected.connectedAt, "2026-08-05T01:59:00.000Z");
+  assert.equal(projected.listeningAt, null);
+  assert.equal(projected.browserConnected, true);
+  assert.equal("clientSecret" in projected, false);
+  assert.equal("sessionKey" in projected, false);
 });
 
 test("OAuth refresh and GPT Live admission stay server-side", async () => {
@@ -205,7 +274,11 @@ test("OAuth refresh and GPT Live admission stay server-side", async () => {
     location: { kind: "json", path: storePath }, fetch: fakeFetch, now: () => 10_000,
   });
 
-  assert.equal(await broker.createCall("offer-sdp\r\n"), "answer-sdp");
+  assert.deepEqual(await broker.createCall("offer-sdp\r\n"), {
+    sdp: "answer-sdp",
+    model: "gpt-live-1-boulder-alpha",
+    voice: "ember",
+  });
   assert.match(calls[0]!.body, /grant_type=refresh_token/);
   assert.equal(calls[1]!.url, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
   assert.equal(calls[1]!.authorization, "Bearer access-new");
@@ -252,4 +325,34 @@ test("GPT Live admission errors expose bounded sanitized provider detail", async
       && !error.message.includes("\n")
       && error.message.length <= 860,
   );
+});
+
+test("subscription admission retries proven voice when a declarative alternative is rejected", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-voice-"));
+  const storePath = join(directory, "auth-profiles.json");
+  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
+    "openai:default": {
+      type: "oauth", provider: "openai", access: "current", refresh: "refresh",
+      expires: Date.now() + 3_600_000, accountId: "acct-test",
+    },
+  } }));
+  const bodies: unknown[] = [];
+  const broker = new OpenClawOAuthRealtime({
+    location: { kind: "json", path: storePath },
+    voice: "preferred-female-voice",
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return bodies.length === 1
+        ? new Response("unsupported voice", { status: 400 })
+        : new Response("answer-sdp", { status: 200 });
+    },
+  });
+
+  assert.deepEqual(await broker.createCall("offer-sdp"), {
+    sdp: "answer-sdp",
+    model: "gpt-live-1-boulder-alpha",
+    voice: "ember",
+  });
+  assert.equal((bodies[0] as any).session.audio.output.voice, "preferred-female-voice");
+  assert.equal((bodies[1] as any).session.audio.output.voice, "ember");
 });
