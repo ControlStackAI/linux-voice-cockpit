@@ -1,6 +1,8 @@
+import { AudioTap } from "./audio-tap.js";
 import { CockpitController } from "./cockpit-controller.js";
 import { RealtimeEventBridge } from "./realtime-event-bridge.js";
 import { WebRtcTransport } from "./webrtc-transport.js";
+import type { TurnMarker } from "./desktop-audio-protocol.js";
 import type { BrowserConfiguration, CockpitState, GatewayClient, GatewayEvent } from "./contracts.js";
 
 interface PendingLocalRequest {
@@ -103,6 +105,21 @@ class LocalGatewayProxy implements GatewayClient {
     }));
   }
 
+  /**
+   * Audio and turn markers share this one socket deliberately: WebSocket orders data
+   * messages per connection regardless of type, so speak.end cannot overtake the last
+   * audio frame of its utterance and clip the final word.
+   */
+  publishAudioFrame(frame: ArrayBuffer): void {
+    if (this.#socket.readyState !== WebSocket.OPEN) return;
+    this.#socket.send(frame);
+  }
+
+  publishTurnMarker(marker: TurnMarker): void {
+    if (this.#socket.readyState !== WebSocket.OPEN) return;
+    this.#socket.send(JSON.stringify({ type: "turn", marker }));
+  }
+
   close(): void {
     this.#socket.close(1000, "page shutdown");
   }
@@ -121,9 +138,19 @@ const cancel = required<HTMLButtonElement>("cancel");
 const steeringText = required<HTMLInputElement>("steering-text");
 const audio = required<HTMLAudioElement>("remote-audio");
 
+const audioTap = new AudioTap({ publish: (frame) => gateway.publishAudioFrame(frame) });
+
 let transport: WebRtcTransport | null = null;
 let bridge: RealtimeEventBridge | null = null;
 let startInFlight = false;
+
+function onTurnMarker(marker: TurnMarker): void {
+  // Marker first, then arm. speak.start must reach the socket ahead of the utterance's
+  // first audio frame, and arming is what starts producing those frames.
+  gateway.publishTurnMarker(marker);
+  if (marker.type === "speak.start") audioTap.arm(marker.id);
+  else if (marker.type === "speak.end" || marker.type === "speak.cancel") audioTap.disarm();
+}
 
 cockpit.subscribe((state) => {
   status.textContent = state.phase;
@@ -180,6 +207,11 @@ async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk", prefere
     onRemoteStream: (stream) => {
       audio.srcObject = stream;
       void audio.play();
+      // The tap is lip-sync only and must never break voice: a failure here degrades the
+      // avatar, it does not end the call.
+      void audioTap.attach(stream).catch((error: unknown) => {
+        console.warn("Desktop audio tap unavailable:", error);
+      });
     },
     onConnectionState: (state) => {
       if (state === "connected") {
@@ -205,7 +237,7 @@ async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk", prefere
     },
   });
   transport = nextTransport;
-  activeBridge = new RealtimeEventBridge(cockpit, nextTransport);
+  activeBridge = new RealtimeEventBridge(cockpit, nextTransport, onTurnMarker);
   bridge = activeBridge;
   bridge.start();
   await nextTransport.connect(launch);
@@ -232,8 +264,11 @@ window.addEventListener("pagehide", () => {
 }, { once: true });
 
 async function teardown(reset = true): Promise<void> {
+  // stop() first: it emits speak.cancel for an open utterance, and that marker has to go
+  // out while the tap and socket are still live.
   bridge?.stop();
   bridge = null;
+  await audioTap.detach();
   transport?.close();
   transport = null;
   audio.pause();

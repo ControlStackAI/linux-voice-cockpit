@@ -6,6 +6,12 @@ import { GatewayWebSocketClient } from "./gateway-websocket-client.js";
 import { OpenClawOAuthRealtime, type OAuthProfileLocation } from "./openclaw-oauth-realtime.js";
 import { cockpitContentSecurityPolicy } from "./content-security-policy.js";
 import { initialProjection, sanitizeProjection } from "./state-projection.js";
+import {
+  type ControlFrame,
+  helloFrame,
+  isTurnMarkerType,
+  isValidAudioFrame,
+} from "./desktop-audio-protocol.js";
 import type { BrowserConfiguration, CockpitProjection } from "./contracts.js";
 
 interface LocalRequest {
@@ -69,7 +75,19 @@ const assets = new Map<string, { path: string; type: string }>([
   ["/cockpit-controller.js", { path: `${root}/dist/src/cockpit-controller.js`, type: "text/javascript; charset=utf-8" }],
   ["/realtime-event-bridge.js", { path: `${root}/dist/src/realtime-event-bridge.js`, type: "text/javascript; charset=utf-8" }],
   ["/webrtc-transport.js", { path: `${root}/dist/src/webrtc-transport.js`, type: "text/javascript; charset=utf-8" }],
+  ["/audio-tap.js", { path: `${root}/dist/src/audio-tap.js`, type: "text/javascript; charset=utf-8" }],
+  ["/desktop-audio-protocol.js", { path: `${root}/dist/src/desktop-audio-protocol.js`, type: "text/javascript; charset=utf-8" }],
+  ["/audio-tap-worklet.js", { path: `${root}/static/audio-tap-worklet.js`, type: "text/javascript; charset=utf-8" }],
 ]);
+
+/** ~2 s of audio. Past this a subscriber is not keeping up and oldest audio is dropped. */
+const AUDIO_BACKLOG_FRAMES = 50;
+
+interface AudioSubscriber {
+  socket: WebSocket;
+  queue: Array<{ data: string | Buffer; binary: boolean }>;
+  sending: boolean;
+}
 
 let projection = initialProjection();
 let activeBrowser: WebSocket | null = null;
@@ -130,7 +148,45 @@ const server = createServer(async (request, response) => {
   }
 });
 
-const sockets = new WebSocketServer({ server, path: "/control" });
+// Both endpoints use noServer and share one upgrade router. Attaching two path-scoped
+// WebSocketServers to the same HTTP server does not work: each aborts the handshake for
+// any path that is not its own, so whichever registers first kills the other.
+const sockets = new WebSocketServer({ noServer: true });
+const audioSockets = new WebSocketServer({ noServer: true });
+const audioSubscribers = new Map<WebSocket, AudioSubscriber>();
+
+server.on("upgrade", (request, socket, head) => {
+  const pathname = new URL(request.url ?? "/", `http://${host}:${port}`).pathname;
+  if (pathname === "/control") {
+    sockets.handleUpgrade(request, socket, head, (client) => {
+      sockets.emit("connection", client, request);
+    });
+    return;
+  }
+  if (pathname === "/desktop/audio") {
+    if (!isLoopback(request.socket.remoteAddress) || !isAllowedAudioOrigin(request.headers.origin)) {
+      refuseUpgrade(socket, 403, "Desktop audio is loopback-only");
+      return;
+    }
+    audioSockets.handleUpgrade(request, socket, head, (client) => {
+      audioSockets.emit("connection", client, request);
+    });
+    return;
+  }
+  refuseUpgrade(socket, 404, "Unknown WebSocket endpoint");
+});
+
+/** Answer with a real status line so a rejected consumer sees why, not a bare reset. */
+function refuseUpgrade(socket: import("node:stream").Duplex, status: number, reason: string): void {
+  const body = `${reason}\n`;
+  socket.end(
+    `HTTP/1.1 ${status} ${status === 403 ? "Forbidden" : "Not Found"}\r\n`
+    + "Connection: close\r\n"
+    + "Content-Type: text/plain; charset=utf-8\r\n"
+    + `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+  );
+}
+
 sockets.on("connection", (browser, request) => {
   const origin = request.headers.origin;
   if (origin !== `http://${host}:${port}`) {
@@ -139,6 +195,70 @@ sockets.on("connection", (browser, request) => {
   }
   void serveBrowser(browser);
 });
+
+audioSockets.on("connection", (subscriber) => {
+  const state: AudioSubscriber = { socket: subscriber, queue: [], sending: false };
+  audioSubscribers.set(subscriber, state);
+  // hello precedes every binary frame so the consumer builds its resampler against a
+  // known rate instead of guessing one.
+  enqueueSubscriber(state, JSON.stringify(helloFrame(projection.phase)), false);
+  subscriber.once("close", () => audioSubscribers.delete(subscriber));
+  subscriber.on("error", () => audioSubscribers.delete(subscriber));
+});
+
+/**
+ * Presence connects with the Node `ws` client, which sends no Origin header at all.
+ * Reject foreign origins, allow an absent one; the loopback bind is the real boundary.
+ */
+function isAllowedAudioOrigin(origin: string | undefined): boolean {
+  return origin === undefined || origin === `http://${host}:${port}`;
+}
+
+/** Control frames are never dropped: losing speak.end strands a consumer mid-utterance. */
+function broadcastAudioControl(frame: ControlFrame): void {
+  const encoded = JSON.stringify(frame);
+  for (const subscriber of audioSubscribers.values()) {
+    enqueueSubscriber(subscriber, encoded, false);
+  }
+}
+
+/**
+ * Best effort. A stalled subscriber must never backpressure the browser's control
+ * socket, so frames are dropped rather than queued; the seq gap tells the consumer.
+ */
+function broadcastAudioFrame(frame: Buffer): void {
+  for (const subscriber of audioSubscribers.values()) {
+    const pendingAudio = subscriber.queue.reduce((count, item) => count + Number(item.binary), 0);
+    if (pendingAudio >= AUDIO_BACKLOG_FRAMES) {
+      const oldestAudio = subscriber.queue.findIndex((item) => item.binary);
+      if (oldestAudio >= 0) subscriber.queue.splice(oldestAudio, 1);
+    }
+    enqueueSubscriber(subscriber, frame, true);
+  }
+}
+
+/** Per-subscriber queue preserves text/binary ordering without using the socket as storage. */
+function enqueueSubscriber(subscriber: AudioSubscriber, data: string | Buffer, binary: boolean): void {
+  if (subscriber.socket.readyState !== WebSocket.OPEN) return;
+  subscriber.queue.push({ data, binary });
+  pumpSubscriber(subscriber);
+}
+
+function pumpSubscriber(subscriber: AudioSubscriber): void {
+  if (subscriber.sending || subscriber.socket.readyState !== WebSocket.OPEN) return;
+  const next = subscriber.queue.shift();
+  if (!next) return;
+  subscriber.sending = true;
+  subscriber.socket.send(next.data, { binary: next.binary }, (error) => {
+    subscriber.sending = false;
+    if (error) {
+      audioSubscribers.delete(subscriber.socket);
+      subscriber.socket.terminate();
+      return;
+    }
+    pumpSubscriber(subscriber);
+  });
+}
 
 async function serveBrowser(browser: WebSocket): Promise<void> {
   const gateway = new GatewayWebSocketClient({ url: gatewayUrl, token: gatewayToken! });
@@ -151,13 +271,26 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
     projection = { ...projection, browserConnected: true, updatedAt: new Date().toISOString() };
     queueProjectionWrite();
     browser.send(JSON.stringify({ type: "ready", configuration: browserConfiguration }));
-    browser.on("message", async (raw) => {
+    browser.on("message", async (raw, isBinary) => {
       let request: LocalRequest | undefined;
+      if (isBinary) {
+        const audio = toBuffer(raw);
+        if (isValidAudioFrame(audio)) broadcastAudioFrame(audio);
+        return;
+      }
       try {
         const frame = JSON.parse(String(raw)) as Record<string, unknown>;
         if (frame.type === "state") {
+          const previousPhase = projection.phase;
           projection = sanitizeProjection(frame.state, true);
           queueProjectionWrite();
+          if (projection.phase !== previousPhase) {
+            broadcastAudioControl({ type: "phase", phase: projection.phase, t: Date.now() });
+          }
+          return;
+        }
+        if (frame.type === "turn") {
+          relayTurnMarker(frame.marker);
           return;
         }
         request = frame as unknown as LocalRequest;
@@ -184,6 +317,7 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
   }
   browser.once("close", () => {
     if (activeBrowser === browser) activeBrowser = null;
+    const previousPhase = projection.phase;
     projection = {
       ...projection,
       phase: projection.phase === "idle" ? "idle" : "error",
@@ -192,8 +326,32 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
       updatedAt: new Date().toISOString(),
     };
     queueProjectionWrite();
+    // A page that dies mid-utterance sends no speak.end. Publish the phase change so a
+    // consumer can tear its own session down instead of waiting on an utterance that
+    // will never close.
+    if (projection.phase !== previousPhase) {
+      broadcastAudioControl({ type: "phase", phase: projection.phase, t: Date.now() });
+    }
     unsubscribe();
     void gateway.close();
+  });
+}
+
+function toBuffer(raw: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(raw)) return raw;
+  if (Array.isArray(raw)) return Buffer.concat(raw);
+  return Buffer.from(raw);
+}
+
+/** Re-emits a browser turn marker on the tap, dropping anything not in the vocabulary. */
+function relayTurnMarker(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const marker = value as { type?: unknown; id?: unknown };
+  if (!isTurnMarkerType(marker.type) || !Number.isInteger(marker.id)) return;
+  broadcastAudioControl({
+    type: marker.type,
+    id: (marker.id as number) >>> 0,
+    t: Date.now(),
   });
 }
 
@@ -258,7 +416,9 @@ server.listen(port, host, () => {
 
 async function shutdown(): Promise<void> {
   for (const client of sockets.clients) client.close(1001, "service shutdown");
+  for (const client of audioSubscribers.keys()) client.close(1001, "service shutdown");
   sockets.close();
+  audioSockets.close();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 

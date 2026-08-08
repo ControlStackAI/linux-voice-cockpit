@@ -6,3 +6,4 @@ export * from "./openclaw-oauth-realtime.js";
 export * from "./content-security-policy.js";
 export * from "./gateway-websocket-client.js";
 export * from "./state-projection.js";
+export * from "./desktop-audio-protocol.js";

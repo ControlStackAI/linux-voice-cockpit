@@ -13,6 +13,15 @@ import {
   cockpitContentSecurityPolicy,
   initialProjection,
   sanitizeProjection,
+  FLAG_UTTERANCE_START,
+  FRAME_BYTES,
+  FRAME_SAMPLES,
+  SAMPLE_RATE,
+  decodeAudioFrameHeader,
+  decodeAudioFrameSamples,
+  encodeAudioFrame,
+  isValidAudioFrame,
+  type TurnMarker,
 } from "../src/index.js";
 
 class FakeGateway implements GatewayClient {
@@ -355,4 +364,137 @@ test("subscription admission retries proven voice when a declarative alternative
   });
   assert.equal((bodies[0] as any).session.audio.output.voice, "preferred-female-voice");
   assert.equal((bodies[1] as any).session.audio.output.voice, "ember");
+});
+
+test("audio frames round-trip the 40 ms header contract", () => {
+  const samples = new Float32Array(FRAME_SAMPLES);
+  for (let index = 0; index < FRAME_SAMPLES; index += 1) {
+    samples[index] = Math.sin(index / 32) * 0.5;
+  }
+  const frame = encodeAudioFrame(samples, { seq: 7, id: 9, flags: FLAG_UTTERANCE_START });
+
+  assert.equal(frame.byteLength, FRAME_BYTES);
+  assert.deepEqual(decodeAudioFrameHeader(frame), {
+    version: 1,
+    flags: FLAG_UTTERANCE_START,
+    sampleRate: SAMPLE_RATE,
+    seq: 7,
+    id: 9,
+  });
+  assert.deepEqual(decodeAudioFrameSamples(frame), samples);
+  assert.equal(FRAME_SAMPLES / SAMPLE_RATE, 0.04);
+  assert.equal(FRAME_SAMPLES % 128, 0);
+});
+
+test("malformed audio frames are rejected rather than relayed", () => {
+  const samples = new Float32Array(FRAME_SAMPLES);
+  assert.equal(isValidAudioFrame(encodeAudioFrame(samples, { seq: 1, id: 1 })), true);
+  assert.equal(isValidAudioFrame(new ArrayBuffer(8)), false);
+  assert.equal(isValidAudioFrame(new ArrayBuffer(FRAME_BYTES - 4)), false);
+
+  const wrongVersion = encodeAudioFrame(samples, { seq: 1, id: 1 });
+  new DataView(wrongVersion).setUint8(0, 2);
+  assert.equal(isValidAudioFrame(wrongVersion), false);
+
+  const wrongRate = encodeAudioFrame(samples, { seq: 1, id: 1 });
+  new DataView(wrongRate).setUint32(4, 44_100, true);
+  assert.equal(isValidAudioFrame(wrongRate), false);
+
+  assert.throws(() => encodeAudioFrame(new Float32Array(128), { seq: 1, id: 1 }), /exactly 1920/);
+});
+
+async function markersFor(
+  events: Array<Record<string, unknown>>,
+  after?: (bridge: RealtimeEventBridge) => void,
+): Promise<TurnMarker[]> {
+  const markers: TurnMarker[] = [];
+  const cockpit = new CockpitController(new FakeGateway());
+  const bridge = new RealtimeEventBridge(cockpit, new FakeChannel(), (marker) => markers.push(marker));
+  await cockpit.createVoiceSession("agent:main:test");
+  for (const event of events) await bridge.handle(event);
+  after?.(bridge);
+  return markers;
+}
+
+test("turn markers track one clean listen-then-speak exchange", async () => {
+  const markers = await markersFor([
+    { type: "input_audio_buffer.speech_started" },
+    { type: "input_audio_buffer.speech_stopped" },
+    { type: "response.created" },
+    { type: "response.output_audio.delta", delta: "aa" },
+    { type: "response.output_audio.delta", delta: "bb" },
+    { type: "response.done" },
+  ]);
+
+  assert.deepEqual(markers.map((marker) => marker.type), [
+    "listen.start",
+    "listen.stop",
+    "speak.start",
+    "speak.end",
+  ]);
+  // Ids are monotonic across markers, and an utterance closes under the id it opened
+  // with so a consumer can match end to start.
+  assert.deepEqual(markers.map((marker) => marker.id), [1, 2, 3, 3]);
+});
+
+test("barge-in cancels the open utterance before the new listen turn", async () => {
+  const markers = await markersFor([
+    { type: "response.output_audio.delta", delta: "aa" },
+    { type: "input_audio_buffer.speech_started" },
+    { type: "response.cancelled" },
+  ]);
+
+  assert.deepEqual(markers.map((marker) => marker.type), [
+    "speak.start",
+    "speak.cancel",
+    "listen.start",
+  ]);
+  assert.equal(markers[0]?.id, markers[1]?.id);
+  // response.cancelled arrives after the utterance is already closed and must not
+  // produce a second cancel for the same utterance.
+  assert.equal(markers.filter((marker) => marker.type === "speak.cancel").length, 1);
+});
+
+test("a transcript-only response never opens an utterance", async () => {
+  const markers = await markersFor([
+    { type: "response.created" },
+    { type: "response.output_audio_transcript.delta", delta: "text only" },
+    { type: "response.done" },
+  ]);
+
+  assert.deepEqual(markers, []);
+});
+
+test("WebRTC playback boundaries keep response.done from clipping the media tail", async () => {
+  const markers = await markersFor([
+    { type: "output_audio_buffer.started" },
+    { type: "response.done" },
+    { type: "output_audio_buffer.stopped" },
+  ]);
+  assert.deepEqual(markers.map(({ type, id }) => ({ type, id })), [
+    { type: "speak.start", id: 1 },
+    { type: "speak.end", id: 1 },
+  ]);
+});
+
+test("a cleared WebRTC playback buffer cancels the open utterance", async () => {
+  const markers = await markersFor([
+    { type: "output_audio_buffer.started" },
+    { type: "output_audio_buffer.cleared" },
+    { type: "output_audio_buffer.stopped" },
+  ]);
+  assert.deepEqual(markers.map(({ type, id }) => ({ type, id })), [
+    { type: "speak.start", id: 1 },
+    { type: "speak.cancel", id: 1 },
+  ]);
+});
+
+test("stopping mid-utterance closes it instead of stranding the consumer", async () => {
+  const markers = await markersFor(
+    [{ type: "response.output_audio.delta", delta: "aa" }],
+    (bridge) => bridge.stop(),
+  );
+
+  assert.deepEqual(markers.map((marker) => marker.type), ["speak.start", "speak.cancel"]);
+  assert.equal(markers[0]?.id, markers[1]?.id);
 });

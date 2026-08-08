@@ -1,4 +1,5 @@
 import { CockpitController } from "./cockpit-controller.js";
+import type { TurnMarker } from "./desktop-audio-protocol.js";
 import type {
   GatewayEvent,
   RealtimeChannel,
@@ -27,10 +28,15 @@ export class RealtimeEventBridge {
     reject: (error: Error) => void;
   }>();
   #unsubscribe: (() => void) | null = null;
+  #markerId = 0;
+  #speakingId: number | null = null;
+  #remotePlaybackEventsSeen = false;
 
   constructor(
     readonly cockpit: CockpitController,
     readonly channel: RealtimeChannel,
+    /** Optional turn-marker sink for the desktop audio tap. */
+    readonly onTurnMarker?: (marker: TurnMarker) => void,
   ) {}
 
   start(): void {
@@ -38,6 +44,9 @@ export class RealtimeEventBridge {
   }
 
   stop(): void {
+    // Close any open utterance first: a consumer that never receives speak.end or
+    // speak.cancel stays mid-sentence forever.
+    this.cancelSpeaking();
     this.#unsubscribe?.();
     this.#unsubscribe = null;
     for (const pending of this.#pendingRuns.values()) {
@@ -58,20 +67,62 @@ export class RealtimeEventBridge {
         this.cockpit.setPhase("listening");
         return;
       case "input_audio_buffer.speech_started":
+        // The user talking over the assistant is the earliest reliable barge-in signal;
+        // it precedes response.cancelled and the truncation event that follows it.
+        this.cancelSpeaking();
+        this.emitMarker("listen.start");
         this.cockpit.setPhase("listening");
         return;
       case "input_audio_buffer.speech_stopped":
+        this.emitMarker("listen.stop");
+        this.cockpit.setPhase("thinking");
+        return;
       case "response.created":
         this.cockpit.setPhase("thinking");
         return;
+      case "output_audio_buffer.started":
+        // WebRTC delivers model audio on the remote media track. These playback events
+        // are the authoritative boundaries when present and align the tap with what the
+        // user actually hears, including the peer connection's jitter-buffer tail.
+        this.#remotePlaybackEventsSeen = true;
+        this.startSpeaking();
+        this.cockpit.setPhase("speaking");
+        return;
+      case "output_audio_buffer.stopped":
+        this.#remotePlaybackEventsSeen = true;
+        this.endSpeaking();
+        this.cockpit.setPhase("listening");
+        return;
+      case "output_audio_buffer.cleared":
+        this.#remotePlaybackEventsSeen = true;
+        this.cancelSpeaking();
+        this.cockpit.setPhase("listening");
+        return;
       case "response.output_audio.delta":
+      case "response.audio.delta":
+        // WebSocket-style providers carry audio as data events. Keep this as a fallback
+        // for those transports; WebRTC normally uses output_audio_buffer.* above.
+        this.startSpeaking();
+        this.cockpit.setPhase("speaking");
+        return;
       case "response.output_audio_transcript.delta":
       case "response.audio_transcript.delta":
         this.cockpit.setPhase("speaking");
         return;
       case "response.done":
+        // In WebRTC this can arrive before the remote media tail finishes playing.
+        // output_audio_buffer.stopped owns the close once playback events are observed.
+        if (!this.#remotePlaybackEventsSeen) {
+          this.endSpeaking();
+          this.cockpit.setPhase("listening");
+        }
+        return;
       case "response.cancelled":
+        this.cancelSpeaking();
         this.cockpit.setPhase("listening");
+        return;
+      case "conversation.item.truncated":
+        this.cancelSpeaking();
         return;
       case "response.function_call_arguments.delta":
         this.bufferDelta(event);
@@ -88,6 +139,40 @@ export class RealtimeEventBridge {
     Promise<unknown> {
     const sessionKey = this.requireSessionKey();
     return this.cockpit.gateway.request("talk.client.steer", { sessionKey, text, mode });
+  }
+
+  /** Opens an utterance on the first audio delta of a response. Idempotent thereafter. */
+  private startSpeaking(): void {
+    if (this.#speakingId !== null) return;
+    this.#speakingId = this.nextMarkerId();
+    this.emit({ type: "speak.start", id: this.#speakingId, t: Date.now() });
+  }
+
+  private endSpeaking(): void {
+    const id = this.#speakingId;
+    if (id === null) return;
+    this.#speakingId = null;
+    this.emit({ type: "speak.end", id, t: Date.now() });
+  }
+
+  private cancelSpeaking(): void {
+    const id = this.#speakingId;
+    if (id === null) return;
+    this.#speakingId = null;
+    this.emit({ type: "speak.cancel", id, t: Date.now() });
+  }
+
+  private emitMarker(type: "listen.start" | "listen.stop"): void {
+    this.emit({ type, id: this.nextMarkerId(), t: Date.now() });
+  }
+
+  private emit(marker: TurnMarker): void {
+    this.onTurnMarker?.(marker);
+  }
+
+  private nextMarkerId(): number {
+    this.#markerId = (this.#markerId + 1) >>> 0 || 1;
+    return this.#markerId;
   }
 
   private bufferDelta(event: Record<string, unknown>): void {
