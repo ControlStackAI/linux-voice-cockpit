@@ -8,7 +8,7 @@ export type CockpitPhase =
 
 export interface CockpitState {
   phase: CockpitPhase;
-  transport: "subscription" | "api" | null;
+  transport: "gateway-talk" | null;
   sessionKey: string | null;
   model: string | null;
   voice: string | null;
@@ -32,7 +32,7 @@ export interface TalkCatalog {
 }
 
 export interface TalkWebRtcLaunch {
-  authMode?: "gateway-talk" | "openclaw-oauth";
+  authMode?: "gateway-talk";
   provider: string;
   transport: "webrtc";
   clientSecret: string;
@@ -41,7 +41,6 @@ export interface TalkWebRtcLaunch {
   model?: string;
   voice?: string;
   expiresAt?: number;
-  sdpExchange?: "client-secret" | "server-proxy";
 }
 
 export interface ToolCallAccepted {
@@ -83,14 +82,13 @@ export interface VoiceRoutePreference {
 }
 
 export interface BrowserConfiguration {
-  subscription: VoiceRoutePreference;
-  api: VoiceRoutePreference;
+  realtime: VoiceRoutePreference;
 }
 
 export interface CockpitProjection {
   schemaVersion: 1;
   phase: CockpitPhase;
-  transport: "subscription" | "api" | null;
+  transport: "gateway-talk" | null;
   model: string | null;
   voice: string | null;
   error: string | null;

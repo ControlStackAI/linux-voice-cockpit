@@ -38,7 +38,7 @@ function collect(socket) {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
 
 const service = spawn(process.execPath, ["dist/src/canary-server.js"], {
-  env: { ...process.env, COCKPIT_PORT: String(port), COCKPIT_ALLOW_API_KEY_FALLBACK: "true" },
+  env: { ...process.env, COCKPIT_PORT: String(port) },
   stdio: ["ignore", "pipe", "pipe"],
 });
 service.stderr.on("data", (chunk) => process.stderr.write(`[service] ${chunk}`));
@@ -81,7 +81,7 @@ try {
   );
 
   fromTap.length = 0;
-  browser.send(JSON.stringify({ type: "state", state: { phase: "speaking", transport: "subscription" } }));
+  browser.send(JSON.stringify({ type: "state", state: { phase: "speaking", transport: "gateway-talk" } }));
   await settle();
   check(
     "a cockpit phase change is published to the tap",

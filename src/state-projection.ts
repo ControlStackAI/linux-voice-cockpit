@@ -26,7 +26,7 @@ export function sanitizeProjection(value: unknown, browserConnected: boolean, no
   return {
     schemaVersion: 1,
     phase,
-    transport: input.transport === "subscription" || input.transport === "api" ? input.transport : null,
+    transport: input.transport === "gateway-talk" ? input.transport : null,
     model: bounded(input.model),
     voice: bounded(input.voice),
     error: bounded(input.error),

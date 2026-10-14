@@ -16,7 +16,7 @@ The service publishes the same JSON document at:
 {
   "schemaVersion": 1,
   "phase": "idle|connecting|listening|thinking|speaking|error",
-  "transport": "subscription|api|null",
+  "transport": "gateway-talk|null",
   "model": "string|null",
   "voice": "string|null",
   "error": "string|null",
@@ -60,15 +60,12 @@ teardown. QML never handles media or credentials.
 
 ## Declarative route preferences
 
-| Environment variable | Proven fallback |
+| Environment variable | Default preference |
 |---|---|
-| `COCKPIT_SUBSCRIPTION_MODEL` | `gpt-live-1-boulder-alpha` |
-| `COCKPIT_SUBSCRIPTION_VOICE` | `ember` |
-| `COCKPIT_API_MODEL` | `gpt-realtime-2.1` |
-| `COCKPIT_API_VOICE` | Gateway-selected default, currently `marin` |
+| `COCKPIT_REALTIME_MODEL` | `gpt-realtime-2.1` |
+| `COCKPIT_REALTIME_VOICE` | `marin` |
 
-Subscription admission retries the proven model/voice only when a configured alternative is
-rejected with HTTP 400. Gateway Talk retries without the requested voice when the Gateway
-rejects the preference, preserving its proven server-selected default. The state projection
+Gateway Talk retries without caller model/voice overrides when the gateway
+rejects the requested voice, preserving its configured server defaults. The state projection
 reports the route actually accepted, not merely the requested preference.
 

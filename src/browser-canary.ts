@@ -8,7 +8,10 @@ import type { BrowserConfiguration, CockpitState, GatewayClient, GatewayEvent } 
 interface PendingLocalRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
 }
+
+const CONTROL_TIMEOUT_MS = 15_000;
 
 class LocalGatewayProxy implements GatewayClient {
   readonly #socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/control`);
@@ -20,6 +23,10 @@ class LocalGatewayProxy implements GatewayClient {
   constructor() {
     this.ready = new Promise((resolve, reject) => {
       let settled = false;
+      const readyTimer = setTimeout(() => {
+        settled = true;
+        reject(new Error(`Local control WebSocket handshake timed out after ${CONTROL_TIMEOUT_MS}ms`));
+      }, CONTROL_TIMEOUT_MS);
       this.#socket.addEventListener("message", (event) => {
         let frame: Record<string, unknown>;
         try {
@@ -30,6 +37,7 @@ class LocalGatewayProxy implements GatewayClient {
         }
         if (frame.type === "ready") {
           settled = true;
+          clearTimeout(readyTimer);
           resolve(frame.configuration as unknown as BrowserConfiguration);
           return;
         }
@@ -39,6 +47,7 @@ class LocalGatewayProxy implements GatewayClient {
         }
         if (frame.type === "fatal") {
           settled = true;
+          clearTimeout(readyTimer);
           reject(new Error(String(frame.error ?? "Local control proxy failed")));
           return;
         }
@@ -51,19 +60,23 @@ class LocalGatewayProxy implements GatewayClient {
         if (frame.type !== "response" || typeof frame.id !== "string") return;
         const pending = this.#pending.get(frame.id);
         if (!pending) return;
+        clearTimeout(pending.timer);
         this.#pending.delete(frame.id);
         if (frame.ok) pending.resolve(frame.payload);
         else pending.reject(new Error(String(frame.error ?? "Local control request failed")));
       });
       this.#socket.addEventListener("error", () => {
         settled = true;
+        clearTimeout(readyTimer);
         reject(new Error("Local control WebSocket connection failed"));
       }, { once: true });
       this.#socket.addEventListener("close", (event) => {
         const reason = event.reason ? `: ${event.reason}` : "";
         const error = new Error(`Local control WebSocket closed (${event.code})${reason}`);
         if (!settled) reject(error);
+        clearTimeout(readyTimer);
         for (const pending of this.#pending.values()) pending.reject(error);
+        for (const pending of this.#pending.values()) clearTimeout(pending.timer);
         this.#pending.clear();
       });
     });
@@ -73,7 +86,15 @@ class LocalGatewayProxy implements GatewayClient {
     await this.ready;
     const id = crypto.randomUUID();
     return new Promise<T>((resolve, reject) => {
-      this.#pending.set(id, { resolve: (value) => resolve(value as T), reject });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`Local control request timed out: ${method}`));
+      }, CONTROL_TIMEOUT_MS);
+      this.#pending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        timer,
+      });
       this.#socket.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -180,17 +201,7 @@ async function startVoice(): Promise<void> {
   stop.disabled = false;
   try {
     const configuration = await gateway.ready;
-    try {
-      await connectVoice("openclaw-oauth", configuration.subscription);
-    } catch (error) {
-      if (!isSubscriptionAdmissionDenied(error)) throw error;
-      await teardown(false);
-      renderProgress(
-        "API fallback",
-        "ChatGPT subscription admission was denied. Connecting through the configured OpenAI Realtime API route.",
-      );
-      await connectVoice("gateway-talk", configuration.api);
-    }
+    await connectVoice(configuration.realtime);
   } catch (error) {
     cockpit.fail(describeStartError(error));
     await teardown(false);
@@ -199,8 +210,8 @@ async function startVoice(): Promise<void> {
   }
 }
 
-async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk", preference: { model: string; voice: string }): Promise<void> {
-  const launch = await cockpit.createVoiceSession(session.value, authMode, preference);
+async function connectVoice(preference: { model: string; voice: string }): Promise<void> {
+  const launch = await cockpit.createVoiceSession(session.value, preference);
   let activeBridge: RealtimeEventBridge;
   const nextTransport = new WebRtcTransport({
     onEvent: (raw) => activeBridge.handle(raw),
@@ -226,14 +237,6 @@ async function connectVoice(authMode: "openclaw-oauth" | "gateway-talk", prefere
       } else {
         renderProgress("microphone ready", "Access granted. Establishing the secure realtime audio connection.");
       }
-    },
-    exchangeOffer: async (sdp) => {
-      const call = await gateway.request<{ sdp: string; model: string; voice: string }>("cockpit.realtime.createCall", {
-        sessionKey: session.value,
-        sdp,
-      });
-      cockpit.setRoute(call.model, call.voice);
-      return call.sdp;
     },
   });
   transport = nextTransport;
@@ -306,9 +309,4 @@ function describeStartError(error: unknown): Error {
     default:
       return new Error(`Microphone request failed (${error.name}): ${error.message}`);
   }
-}
-
-function isSubscriptionAdmissionDenied(error: unknown): boolean {
-  return error instanceof Error
-    && /ChatGPT GPT Live admission failed \((?:401|403|404)\)/.test(error.message);
 }

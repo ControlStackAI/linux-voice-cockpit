@@ -163,7 +163,7 @@ record the app version and timestamp, and tag each result `BLACK-BOX`.
 
 - [x] Initial desktop, voice, session-control, file, and remote-access requirements recorded.
 - [x] Provenance vocabulary and source register established.
-- [x] Explicit `openclaw-oauth` design and API-key fallback gate recorded.
+- [x] Gateway Talk is the sole supported admission path; direct auth-store access removed.
 - [ ] Live ChatGPT GPT Live endpoint and subscription-account evidence recorded.
 - [x] Unknowns and current legal boundary explicit.
 - [ ] Installed iPhone app black-box observations captured.

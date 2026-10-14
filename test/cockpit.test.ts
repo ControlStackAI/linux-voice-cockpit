@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   CockpitController,
   RealtimeEventBridge,
   type GatewayClient,
   type GatewayEvent,
   type RealtimeChannel,
-  OpenClawOAuthRealtime,
   cockpitContentSecurityPolicy,
   initialProjection,
   sanitizeProjection,
@@ -22,6 +18,7 @@ import {
   encodeAudioFrame,
   isValidAudioFrame,
   type TurnMarker,
+  withTimeout,
 } from "../src/index.js";
 
 class FakeGateway implements GatewayClient {
@@ -58,12 +55,22 @@ class FakeGateway implements GatewayClient {
   }
 }
 
-test("CSP exposes the OpenAI media endpoint only when API fallback is enabled", () => {
-  assert.match(cockpitContentSecurityPolicy(false), /connect-src 'self';/);
-  assert.doesNotMatch(cockpitContentSecurityPolicy(false), /api\.openai\.com/);
-  assert.match(
-    cockpitContentSecurityPolicy(true),
-    /connect-src 'self' https:\/\/api\.openai\.com;/,
+test("CSP allows the ephemeral Realtime media endpoint", () => {
+  assert.match(cockpitContentSecurityPolicy(), /connect-src 'self' https:\/\/api\.openai\.com;/);
+});
+
+test("deadline helper resolves completed work and rejects stalled work", async () => {
+  assert.equal(await withTimeout(Promise.resolve("ok"), 100, "fixture"), "ok");
+  await assert.rejects(
+    withTimeout(new Promise<never>(() => {}), 0, "fixture operation"),
+    /fixture operation timed out after 0ms/,
+  );
+});
+
+test("deadline helper preserves an operation failure", async () => {
+  await assert.rejects(
+    withTimeout(Promise.reject(new Error("original failure")), 100, "fixture"),
+    /original failure/,
   );
 });
 
@@ -72,21 +79,21 @@ class FakeChannel implements RealtimeChannel {
   send(event: Record<string, unknown>): void { this.events.push(event); }
 }
 
-test("uses server-mediated OpenClaw OAuth by default", async () => {
+test("uses Gateway Talk authentication by default", async () => {
   const gateway = new FakeGateway();
   const cockpit = new CockpitController(gateway);
   const launch = await cockpit.createVoiceSession("agent:main:test");
 
-  assert.equal(launch.authMode, "openclaw-oauth");
-  assert.equal(launch.sdpExchange, "server-proxy");
-  assert.deepEqual(gateway.requests, []);
+  assert.equal(launch.authMode, "gateway-talk");
+  assert.deepEqual(gateway.requests.map((request) => request.method), ["talk.catalog", "talk.client.create"]);
+  assert.equal(cockpit.state.transport, "gateway-talk");
   assert.equal(JSON.stringify(cockpit.state).includes(launch.clientSecret), false);
 });
 
-test("Gateway Talk is an explicit fallback path", async () => {
+test("Gateway Talk forwards explicit route preferences", async () => {
   const gateway = new FakeGateway();
   const cockpit = new CockpitController(gateway);
-  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk", {
+  const launch = await cockpit.createVoiceSession("agent:main:test", {
     model: "gpt-realtime-2.1",
     voice: "marin",
   });
@@ -95,7 +102,7 @@ test("Gateway Talk is an explicit fallback path", async () => {
   assert.deepEqual(gateway.requests.map((request) => request.method), ["talk.catalog", "talk.client.create"]);
   assert.equal(gateway.requests[1]?.params.voice, "marin");
   assert.equal(gateway.requests[1]?.params.model, "gpt-realtime-2.1");
-  assert.equal(cockpit.state.transport, "api");
+  assert.equal(cockpit.state.transport, "gateway-talk");
 });
 
 test("Gateway Talk retries proven server defaults when a preferred voice is rejected", async () => {
@@ -110,7 +117,7 @@ test("Gateway Talk retries proven server defaults when a preferred voice is reje
   }
   const gateway = new RejectingGateway();
   const cockpit = new CockpitController(gateway);
-  const launch = await cockpit.createVoiceSession("agent:main:test", "gateway-talk", {
+  const launch = await cockpit.createVoiceSession("agent:main:test", {
     model: "gpt-realtime-2.1",
     voice: "preferred-female-voice",
   });
@@ -218,7 +225,7 @@ test("sanitized projection exposes only bounded shell-safe state", () => {
   });
   const projected = sanitizeProjection({
     phase: "listening",
-    transport: "subscription",
+    transport: "gateway-talk",
     model: "gpt-live\nmodel",
     voice: "ember",
     error: `bad\u0000${"x".repeat(400)}`,
@@ -234,136 +241,6 @@ test("sanitized projection exposes only bounded shell-safe state", () => {
   assert.equal(projected.browserConnected, true);
   assert.equal("clientSecret" in projected, false);
   assert.equal("sessionKey" in projected, false);
-});
-
-test("OAuth refresh and GPT Live admission stay server-side", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-"));
-  const storePath = join(directory, "auth-profiles.json");
-  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
-    "openai:default": {
-      type: "oauth", provider: "openai", access: "expired", refresh: "refresh-old",
-      expires: 1, accountId: "acct-test",
-    },
-  } }));
-  const calls: Array<{
-    url: string;
-    authorization: string | null;
-    account: string | null;
-    contentType: string | null;
-    protocol: string | null;
-    accept: string | null;
-    originator: string | null;
-    sessionId: string | null;
-    threadId: string | null;
-    userAgent: string | null;
-    body: string;
-  }> = [];
-  const fakeFetch: typeof fetch = async (input, init) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    calls.push({
-      url,
-      authorization: headers.get("Authorization"),
-      account: headers.get("ChatGPT-Account-ID"),
-      contentType: headers.get("Content-Type"),
-      protocol: headers.get("OpenAI-Alpha"),
-      accept: headers.get("Accept"),
-      originator: headers.get("Originator"),
-      sessionId: headers.get("Session-ID"),
-      threadId: headers.get("Thread-ID"),
-      userAgent: headers.get("User-Agent"),
-      body: String(init?.body ?? ""),
-    });
-    if (url.includes("/oauth/token")) return new Response(JSON.stringify({
-      access_token: "access-new", refresh_token: "refresh-new", expires_in: 3600,
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
-    return new Response("answer-sdp", { status: 200 });
-  };
-  const broker = new OpenClawOAuthRealtime({
-    location: { kind: "json", path: storePath }, fetch: fakeFetch, now: () => 10_000,
-  });
-
-  assert.deepEqual(await broker.createCall("offer-sdp\r\n"), {
-    sdp: "answer-sdp",
-    model: "gpt-live-1-boulder-alpha",
-    voice: "ember",
-  });
-  assert.match(calls[0]!.body, /grant_type=refresh_token/);
-  assert.equal(calls[1]!.url, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
-  assert.equal(calls[1]!.authorization, "Bearer access-new");
-  assert.equal(calls[1]!.account, "acct-test");
-  assert.equal(calls[1]!.contentType, "application/json");
-  assert.equal(calls[1]!.protocol, "quicksilver=v2");
-  assert.equal(calls[1]!.accept, "application/sdp");
-  assert.equal(calls[1]!.originator, "linux_voice_cockpit");
-  assert.match(calls[1]!.sessionId!, /^[0-9a-f-]{36}$/);
-  assert.equal(calls[1]!.threadId, calls[1]!.sessionId);
-  assert.equal(calls[1]!.userAgent, "LinuxVoiceCockpit/0.1");
-  assert.deepEqual(JSON.parse(calls[1]!.body), {
-    sdp: "offer-sdp\r\n",
-    session: {
-      model: "gpt-live-1-boulder-alpha",
-      instructions: "",
-      audio: {
-        output: { voice: "ember" },
-      },
-      delegation: { type: "client" },
-    },
-  });
-  const persisted = JSON.parse(await readFile(storePath, "utf8"));
-  assert.equal(persisted.profiles["openai:default"].refresh, "refresh-new");
-});
-
-test("GPT Live admission errors expose bounded sanitized provider detail", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-error-"));
-  const storePath = join(directory, "auth-profiles.json");
-  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
-    "openai:default": {
-      type: "oauth", provider: "openai", access: "current", refresh: "refresh",
-      expires: Date.now() + 3_600_000, accountId: "acct-test",
-    },
-  } }));
-  const broker = new OpenClawOAuthRealtime({
-    location: { kind: "json", path: storePath },
-    fetch: async () => new Response(`bad\nrequest ${"x".repeat(1_000)}`, { status: 400 }),
-  });
-
-  await assert.rejects(
-    broker.createCall("offer-sdp"),
-    (error: Error) => error.message.startsWith("ChatGPT GPT Live admission failed (400): bad request ")
-      && !error.message.includes("\n")
-      && error.message.length <= 860,
-  );
-});
-
-test("subscription admission retries proven voice when a declarative alternative is rejected", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "cockpit-oauth-voice-"));
-  const storePath = join(directory, "auth-profiles.json");
-  await writeFile(storePath, JSON.stringify({ version: 1, profiles: {
-    "openai:default": {
-      type: "oauth", provider: "openai", access: "current", refresh: "refresh",
-      expires: Date.now() + 3_600_000, accountId: "acct-test",
-    },
-  } }));
-  const bodies: unknown[] = [];
-  const broker = new OpenClawOAuthRealtime({
-    location: { kind: "json", path: storePath },
-    voice: "preferred-female-voice",
-    fetch: async (_input, init) => {
-      bodies.push(JSON.parse(String(init?.body)));
-      return bodies.length === 1
-        ? new Response("unsupported voice", { status: 400 })
-        : new Response("answer-sdp", { status: 200 });
-    },
-  });
-
-  assert.deepEqual(await broker.createCall("offer-sdp"), {
-    sdp: "answer-sdp",
-    model: "gpt-live-1-boulder-alpha",
-    voice: "ember",
-  });
-  assert.equal((bodies[0] as any).session.audio.output.voice, "preferred-female-voice");
-  assert.equal((bodies[1] as any).session.audio.output.voice, "ember");
 });
 
 test("audio frames round-trip the 40 ms header contract", () => {

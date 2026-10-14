@@ -10,7 +10,7 @@ Prototype · MIT · [Project overview](docs/OVERVIEW.md) · [Landing-page source
 
 Linux Voice Cockpit connects realtime voice sessions to OpenClaw agent consult/control tools. The current implementation is a **typed, headless control plane with a loopback microphone canary**, not a packaged desktop application.
 
-- Server-side OpenClaw OAuth profile discovery and refresh.
+- Gateway-mediated realtime session admission through OpenClaw Talk.
 - Browser WebRTC transport and realtime tool-call bridging.
 - Redacted session-state projection for consuming clients.
 - Explicit microphone, data-channel, peer, and session cleanup.
@@ -32,31 +32,43 @@ These commands build and test the local code. They do not prove that a provider 
 
 ## Try the microphone canary
 
-You need a compatible OpenClaw gateway, an authorized provider profile, and microphone access in the browser. Supply credentials to the service environment through your normal secret mechanism; do not put tokens in committed files.
+You need a compatible OpenClaw gateway with Realtime Talk configured, a
+gateway token, and microphone access in the browser. Provider authentication
+is owned by the gateway; the cockpit never reads OpenClaw's SQLite or JSON auth
+stores. Do not put tokens in committed files.
 
 | Variable | Purpose |
 | --- | --- |
 | `OPENCLAW_GATEWAY_TOKEN` | Required gateway credential, retained server-side |
 | `OPENCLAW_GATEWAY_URL` | Gateway WebSocket endpoint; defaults to the local gateway |
-| `COCKPIT_OPENCLAW_AUTH_STORE` | Provider profile store; set explicitly for non-default gateway instances |
-| `COCKPIT_OPENCLAW_AUTH_PROFILE` | Optional profile selector |
+| `COCKPIT_REALTIME_MODEL` | Optional model preference passed to `talk.client.create` |
+| `COCKPIT_REALTIME_VOICE` | Optional voice preference passed to `talk.client.create` |
 | `COCKPIT_SESSION_KEY` | The one session admitted by the canary proxy |
 | `COCKPIT_PORT` | Local canary port; default `4280` |
 
 ```sh
-# Run only after providing the gateway token and correct profile-store path.
+# Run only after supplying the gateway token through a protected environment source.
 npm run canary
 ```
 
-Open the loopback address printed by the service on the same machine and select **Start microphone**. The default auth-store path targets the legacy main-agent state; it may not match your gateway instance. Read the [live canary guide](docs/live-linux-canary.md) before connecting an account.
-
-Gateway Talk/API-key mode is an explicit fallback, enabled only with `COCKPIT_REALTIME_AUTH_MODE=gateway-talk` and `COCKPIT_ALLOW_API_KEY_FALLBACK=true`. It may incur separate API charges. Subscription billing for the default realtime path remains **unproven without live endpoint and account-side evidence**.
+Open the loopback address printed by the service on the same machine and select
+**Start microphone**. The only supported admission path is OpenClaw Gateway
+Talk: the gateway returns an ephemeral Realtime credential and the browser uses
+it for the WebRTC SDP exchange. The gateway's provider configuration determines
+credential selection and billing. This project does not claim a particular
+billing route without separate live, account-side evidence.
 
 ## Architecture
 
-The browser owns capture and WebRTC transport. The service owns authentication and a narrow gateway proxy. Realtime consult/control events bridge to the selected OpenClaw session; a redacted projection reports state to clients.
+The browser owns capture and WebRTC transport. The service owns the gateway
+credential and exposes a narrow Gateway Talk proxy. Realtime consult/control
+events bridge to the selected OpenClaw session; a redacted projection reports
+state to clients.
 
-The browser is not given provider OAuth or gateway credentials. This design boundary is not a claim that the prototype has received an independent security audit.
+The browser receives only the gateway-minted ephemeral Realtime credential; it
+is not given durable provider credentials or the gateway token. This design
+boundary is not a claim that the prototype has received an independent security audit.
+
 
 ## Documentation
 

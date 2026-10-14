@@ -3,7 +3,6 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 import { GatewayWebSocketClient } from "./gateway-websocket-client.js";
-import { OpenClawOAuthRealtime, type OAuthProfileLocation } from "./openclaw-oauth-realtime.js";
 import { cockpitContentSecurityPolicy } from "./content-security-policy.js";
 import { initialProjection, sanitizeProjection } from "./state-projection.js";
 import {
@@ -30,45 +29,21 @@ const allowedMethods = new Set([
   "talk.client.create",
   "talk.client.toolCall",
   "talk.client.steer",
-  "cockpit.realtime.createCall",
 ]);
-const authMode = process.env.COCKPIT_REALTIME_AUTH_MODE ?? "openclaw-oauth";
-const allowApiKeyFallback = process.env.COCKPIT_ALLOW_API_KEY_FALLBACK === "true";
 const browserConfiguration: BrowserConfiguration = {
-  subscription: {
-    model: preference("COCKPIT_SUBSCRIPTION_MODEL", "gpt-live-1-boulder-alpha"),
-    voice: preference("COCKPIT_SUBSCRIPTION_VOICE", "ember"),
-  },
-  api: {
-    model: preference("COCKPIT_API_MODEL", "gpt-realtime-2.1"),
-    voice: preference("COCKPIT_API_VOICE", "marin"),
+  realtime: {
+    model: preference("COCKPIT_REALTIME_MODEL", "gpt-realtime-2.1"),
+    voice: preference("COCKPIT_REALTIME_VOICE", "marin"),
   },
 };
 const statePath = process.env.COCKPIT_STATE_PATH
   ?? `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}/linux-voice-cockpit.json`;
-const authStorePath = process.env.COCKPIT_OPENCLAW_AUTH_STORE
-  ?? `${process.env.HOME}/.openclaw/agents/main/agent/openclaw-agent.sqlite`;
-const authLocation: OAuthProfileLocation = {
-  kind: authStorePath.endsWith(".json") ? "json" : "sqlite",
-  path: authStorePath,
-  ...(process.env.COCKPIT_OPENCLAW_AUTH_PROFILE
-    ? { profileId: process.env.COCKPIT_OPENCLAW_AUTH_PROFILE }
-    : {}),
-};
-if (authMode !== "openclaw-oauth" && !(authMode === "gateway-talk" && allowApiKeyFallback)) {
-  throw new Error("API-key/Gateway Talk mode requires COCKPIT_ALLOW_API_KEY_FALLBACK=true");
-}
-const oauthRealtime = new OpenClawOAuthRealtime({
-  location: authLocation,
-  model: browserConfiguration.subscription.model,
-  voice: browserConfiguration.subscription.voice,
-});
 if (!gatewayToken) {
   throw new Error("OPENCLAW_GATEWAY_TOKEN is required; it is never sent to the browser");
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const contentSecurityPolicy = cockpitContentSecurityPolicy(allowApiKeyFallback);
+const contentSecurityPolicy = cockpitContentSecurityPolicy();
 const assets = new Map<string, { path: string; type: string }>([
   ["/", { path: `${root}/static/canary.html`, type: "text/html; charset=utf-8" }],
   ["/canary.js", { path: `${root}/dist/src/browser-canary.js`, type: "text/javascript; charset=utf-8" }],
@@ -295,14 +270,15 @@ async function serveBrowser(browser: WebSocket): Promise<void> {
         }
         request = frame as unknown as LocalRequest;
         assertAllowedRequest(request);
-        if (request.method === "talk.client.create" && !allowApiKeyFallback) {
-          throw new Error("OpenAI Realtime API fallback is disabled by cockpit policy");
-        }
-        const payload = request.method === "cockpit.realtime.createCall"
-          ? await oauthRealtime.createCall(String(request.params?.sdp ?? ""))
-          : await gateway.request(request.method, request.params ?? {});
+        const startedAt = Date.now();
+        console.info(`[control] request ${request.id} ${request.method}`);
+        const payload = await gateway.request(request.method, request.params ?? {});
+        console.info(`[control] response ${request.id} ${request.method} ok ${Date.now() - startedAt}ms`);
         browser.send(JSON.stringify({ type: "response", id: request.id, ok: true, payload }));
       } catch (error) {
+        if (request) {
+          console.warn(`[control] response ${request.id} ${request.method} error`);
+        }
         browser.send(JSON.stringify({
           type: "response",
           id: request?.id,
