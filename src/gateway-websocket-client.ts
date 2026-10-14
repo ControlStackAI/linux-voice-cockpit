@@ -16,6 +16,11 @@ interface GatewayWireEvent {
   payload?: unknown;
 }
 
+interface GatewayHelloOk {
+  type: "hello-ok";
+  protocol: 4;
+}
+
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -47,69 +52,126 @@ export class GatewayWebSocketClient implements GatewayConnection {
     this.#ready = new Promise((resolve, reject) => {
       const socket = new WebSocket(this.options.url);
       this.#socket = socket;
-      const fail = (error: Error) => {
-        this.#ready = null;
-        reject(error);
+      let admitted = false;
+      let admissionSettled = false;
+      let disconnected = false;
+      let challengeReceived = false;
+      const admissionTimer = setTimeout(() => {
+        failAdmission(new Error("Gateway handshake timed out"));
+      }, this.timeoutMs);
+
+      const disconnect = (error: Error) => {
+        if (disconnected) return;
+        disconnected = true;
+        this.rejectPending(error);
+        if (this.#socket === socket) {
+          this.#socket = null;
+          this.#ready = null;
+        }
       };
-      socket.once("error", fail);
-      socket.on("message", (data) => {
-        let frame: GatewayResponse | GatewayWireEvent;
-        try {
-          frame = JSON.parse(String(data)) as GatewayResponse | GatewayWireEvent;
-        } catch {
+      const terminate = () => {
+        if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+      };
+      const failAdmission = (error: Error) => {
+        if (admissionSettled) return;
+        admissionSettled = true;
+        clearTimeout(admissionTimer);
+        disconnect(error);
+        reject(error);
+        terminate();
+      };
+      socket.on("error", (error) => {
+        const connectionError = new Error(`Gateway connection error: ${error.message}`);
+        if (!admitted) {
+          failAdmission(connectionError);
           return;
         }
+        disconnect(connectionError);
+        terminate();
+      });
+      socket.on("message", (data) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(String(data));
+        } catch {
+          if (!admitted) failAdmission(new Error("Gateway handshake was not valid JSON"));
+          return;
+        }
+        if (!isGatewayResponse(parsed) && !isGatewayWireEvent(parsed)) {
+          if (!admitted) failAdmission(new Error("Gateway handshake was not a valid Gateway frame"));
+          return;
+        }
+        const frame = parsed;
         if (frame.type === "event" && frame.event === "connect.challenge") {
+          if (admitted) {
+            const error = new Error("Gateway sent an unexpected connect challenge");
+            disconnect(error);
+            terminate();
+            return;
+          }
+          if (challengeReceived) {
+            failAdmission(new Error("Gateway sent an unexpected connect challenge"));
+            return;
+          }
+          challengeReceived = true;
           const payload = frame.payload as { nonce?: unknown } | undefined;
-          if (typeof payload?.nonce !== "string") {
-            fail(new Error("Gateway challenge did not include a nonce"));
+          if (!isNonEmptyString(payload?.nonce)) {
+            failAdmission(new Error("Gateway challenge did not include a nonce"));
             return;
           }
           const id = randomUUID();
           this.#pending.set(id, {
-            resolve: () => {
-              socket.off("error", fail);
+            resolve: (value) => {
+              if (!isGatewayHelloOk(value)) {
+                failAdmission(new Error("Gateway connect response was not a valid hello-ok envelope"));
+                return;
+              }
+              admitted = true;
+              admissionSettled = true;
+              clearTimeout(admissionTimer);
               resolve();
             },
-            reject: fail,
-            timer: setTimeout(() => fail(new Error("Gateway handshake timed out")), this.timeoutMs),
+            reject: failAdmission,
+            timer: admissionTimer,
           });
-          socket.send(JSON.stringify({
-            type: "req",
-            id,
-            method: "connect",
-            params: {
-              minProtocol: 4,
-              maxProtocol: 4,
-              client: {
-                id: "gateway-client",
-                version: "0.1.0",
-                platform: process.platform,
-                mode: "backend",
+          try {
+            socket.send(JSON.stringify({
+              type: "req",
+              id,
+              method: "connect",
+              params: {
+                minProtocol: 4,
+                maxProtocol: 4,
+                client: {
+                  id: "gateway-client",
+                  version: "0.1.0",
+                  platform: process.platform,
+                  mode: "backend",
+                },
+                role: "operator",
+                scopes: ["operator.read", "operator.write"],
+                caps: [],
+                commands: [],
+                permissions: {},
+                auth: { token: this.options.token },
+                locale: "en-US",
+                userAgent: "linux-voice-cockpit/0.1.0",
               },
-              role: "operator",
-              scopes: ["operator.read", "operator.write"],
-              caps: [],
-              commands: [],
-              permissions: {},
-              auth: { token: this.options.token },
-              locale: "en-US",
-              userAgent: "linux-voice-cockpit/0.1.0",
-            },
-          }));
+            }));
+          } catch (error) {
+            failAdmission(asError(error, "Gateway connect request failed"));
+          }
           return;
         }
         this.onFrame(frame);
       });
       socket.on("close", () => {
         const error = new Error("Gateway connection closed");
-        for (const pending of this.#pending.values()) {
-          clearTimeout(pending.timer);
-          pending.reject(error);
+        if (!admitted) {
+          failAdmission(error);
+          return;
         }
-        this.#pending.clear();
-        this.#ready = null;
-        this.#socket = null;
+        disconnect(error);
       });
     });
     return this.#ready;
@@ -163,7 +225,69 @@ export class GatewayWebSocketClient implements GatewayConnection {
     else pending.reject(new Error(frame.error?.message ?? "Gateway request failed"));
   }
 
+  private rejectPending(error: Error): void {
+    const pendingRequests = [...this.#pending.values()];
+    this.#pending.clear();
+    for (const pending of pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
   private get timeoutMs(): number {
     return this.options.requestTimeoutMs ?? 15_000;
   }
+}
+
+function asError(value: unknown, fallback: string): Error {
+  return value instanceof Error ? value : new Error(fallback);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isGatewayResponse(value: unknown): value is GatewayResponse {
+  return isRecord(value)
+    && value.type === "res"
+    && typeof value.id === "string"
+    && typeof value.ok === "boolean";
+}
+
+function isGatewayWireEvent(value: unknown): value is GatewayWireEvent {
+  return isRecord(value)
+    && value.type === "event"
+    && typeof value.event === "string";
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0;
+}
+
+function isGatewayHelloOk(value: unknown): value is GatewayHelloOk {
+  if (!isRecord(value) || value.type !== "hello-ok" || value.protocol !== 4) return false;
+
+  const { server, features, snapshot, auth, policy } = value;
+  return isRecord(server)
+    && isNonEmptyString(server.version)
+    && isNonEmptyString(server.connId)
+    && isRecord(features)
+    && isStringArray(features.methods)
+    && isStringArray(features.events)
+    && isRecord(snapshot)
+    && isRecord(auth)
+    && isNonEmptyString(auth.role)
+    && isStringArray(auth.scopes)
+    && isRecord(policy)
+    && isPositiveInteger(policy.maxPayload)
+    && isPositiveInteger(policy.maxBufferedBytes)
+    && isPositiveInteger(policy.tickIntervalMs);
 }
