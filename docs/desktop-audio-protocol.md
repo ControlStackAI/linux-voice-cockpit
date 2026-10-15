@@ -2,7 +2,7 @@
 
 The cockpit publishes the assistant's audio and its turn boundaries on a loopback-only
 WebSocket so a local consumer can drive a lip-synced avatar. The first consumer is
-Presence (`ControlStackAI/presence`), whose matching document is
+Presence (`alinaos-org/presence`), whose matching document is
 `docs/desktop-audio-protocol.md` on its `liveavatar-lite` branch.
 
 Two properties are load-bearing and neither is a preference:

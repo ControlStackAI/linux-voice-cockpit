@@ -21,7 +21,7 @@ Linux Voice Cockpit connects realtime voice sessions to OpenClaw agent consult/c
 Use a current Node.js/npm toolchain capable of this TypeScript project. No minimum Node release is declared in the package; qualify your selected version.
 
 ```sh
-git clone https://github.com/ControlStackAI/linux-voice-cockpit.git
+git clone https://github.com/alinaos-org/linux-voice-cockpit.git
 cd linux-voice-cockpit
 npm ci
 npm run check
