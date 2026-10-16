@@ -4,7 +4,7 @@
 
 **A typed, headless voice control plane connecting browser audio, realtime sessions, and OpenClaw agent tools.**
 
-Prototype · MIT · [Project overview](docs/OVERVIEW.md) · [Landing-page source](docs/site/index.html)
+Prototype · MIT · [Project overview](docs/OVERVIEW.md) · [Website](https://alinaos-org.github.io/linux-voice-cockpit/) · [Landing-page source](docs/site/index.html)
 
 ## What it does
 
